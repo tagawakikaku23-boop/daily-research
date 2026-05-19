@@ -9,7 +9,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='repla
 import requests
 import yfinance as yf
 import feedparser
-from google import genai
+from groq import Groq
 from datetime import datetime
 import time
 import os
@@ -26,7 +26,7 @@ if env_path.exists():
 # ── 設定（環境変数から取得）────────────────────────
 NOTION_API_KEY = os.environ["NOTION_API_KEY"]
 PARENT_PAGE_ID = os.environ["NOTION_PAGE_ID"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 
 # インデックス
 INDICES = [
@@ -180,10 +180,10 @@ def get_rss_news(urls, max_items=5):
             continue
     return items[:max_items]
 
-# ── Gemini APIでアドバイス生成 ───────────────────
+# ── Groq APIでアドバイス生成 ─────────────────────
 def generate_advice(portfolio_summary, news_summary):
     try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
+        client = Groq(api_key=GROQ_API_KEY)
         prompt = f"""あなたは日本株・米国株に詳しい投資アドバイザーです。
 以下のポートフォリオデータと最新ニュースをもとに、今日のアドバイスをください。
 
@@ -211,11 +211,12 @@ def generate_advice(portfolio_summary, news_summary):
 5. 🔄 ポートフォリオ全体への一言（分散・バランスの観点）
 6. 📰 今日のニュースで保有銘柄・検討銘柄に影響しそうな話題"""
 
-        response = client.models.generate_content(
-            model="gemini-2.0-flash-lite",
-            contents=prompt,
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1000,
         )
-        return response.text
+        return response.choices[0].message.content
     except Exception as e:
         return f"AIアドバイス生成失敗: {e}"
 

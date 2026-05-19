@@ -26,11 +26,11 @@ jobs:
           python-version: '3.11'
 
       - name: パッケージインストール
-        run: pip install yfinance feedparser requests google-genai
+        run: pip install yfinance feedparser requests groq
 
       - name: 日報実行
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           NOTION_PAGE_ID: ${{ secrets.NOTION_PAGE_ID }}
         run: python daily_report.py
