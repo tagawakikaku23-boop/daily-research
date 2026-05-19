@@ -149,17 +149,42 @@ def get_ticker_news(ticker, max_items=3):
         news = t.news or []
         items = []
         for n in news[:max_items]:
-            content = n.get("content", {})
-            title   = content.get("title", n.get("title", ""))
-            link    = content.get("canonicalUrl", {}).get("url", n.get("link", ""))
+            content   = n.get("content", {})
+            title     = content.get("title", n.get("title", ""))
+            link      = content.get("canonicalUrl", {}).get("url", n.get("link", ""))
+            publisher = content.get("provider", {}).get("displayName", "") or n.get("publisher", "")
             if not link:
                 click_url = content.get("clickThroughUrl", {})
                 link = click_url.get("url", "") if isinstance(click_url, dict) else ""
             if title:
-                items.append((title.strip(), link))
+                label = f"[{publisher}] {title.strip()}" if publisher else title.strip()
+                items.append((label, link))
         return items
     except Exception:
         return []
+
+# ── 買い/様子見/慎重 判定 ────────────────────────
+def trade_signal(position, div_yield, gain_pct=None):
+    """52W位置・配当・損益から総合判定を返す"""
+    # 含み損かつ配当低い → 要検討
+    if gain_pct is not None and gain_pct < -15 and div_yield < 3.0:
+        return "🔴 要検討（含み損・低配当）"
+    # 割安圏 + 高配当
+    if position < 0.30 and div_yield >= 4.0:
+        return "🟢 強い買い検討（割安＋高配当）"
+    if position < 0.35 and div_yield >= 3.0:
+        return "🟢 買い検討（割安＋配当良好）"
+    if position < 0.40 and div_yield >= 3.0:
+        return "🟢 買い検討圏"
+    # 高値圏
+    if position > 0.80:
+        return "🔴 追加購入は慎重（高値圏）"
+    if position > 0.65:
+        return "🟡 様子見（やや高値）"
+    # 適正圏
+    if div_yield >= 3.0:
+        return "🟡 継続保有（配当良好）"
+    return "🟡 様子見"
 
 # ── カテゴリニュース取得（RSS） ───────────────────
 def get_rss_news(urls, max_items=5):
@@ -220,6 +245,31 @@ def generate_advice(portfolio_summary, news_summary):
     except Exception as e:
         return f"AIアドバイス生成失敗: {e}"
 
+# ── ニュースダイジェスト生成 ─────────────────────
+def generate_news_digest(all_news_text):
+    try:
+        client = Groq(api_key=GROQ_API_KEY)
+        prompt = f"""以下は今日の各カテゴリのニュース一覧です。
+投資家・個人の資産形成に関心がある人向けに、特に重要なニュースを5点に絞って日本語で要約してください。
+経済・マーケット・テクノロジー・地域ニュースをバランスよく取り上げてください。
+各項目は1〜2行で簡潔に。
+
+【今日のニュース一覧】
+{all_news_text}
+
+形式：
+• [カテゴリ] 要約文
+• [カテゴリ] 要約文
+（5点）"""
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=400,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"ダイジェスト生成失敗: {e}"
+
 # ── フォーマットヘルパー ──────────────────────────
 def format_price(ticker, price):
     if ".T" in ticker or ticker.startswith("^N") or ticker.startswith("^T"):
@@ -235,23 +285,25 @@ def div_label(dy):
 def holding_line(ticker, name, shares, cost, d):
     if not d or "error" in d:
         return f"{name}  データ取得失敗"
-    price     = d["price"]
-    chg_str   = f"+{d['chg_pct']:.2f}%" if d["chg_pct"] >= 0 else f"{d['chg_pct']:.2f}%"
-    gain_pct  = (price - cost) / cost * 100
-    gain_str  = f"+{gain_pct:.1f}%" if gain_pct >= 0 else f"{gain_pct:.1f}%"
-    per_str   = f"PER:{d['per']:.1f}" if d["per"] else ""
+    price    = d["price"]
+    chg_str  = f"+{d['chg_pct']:.2f}%" if d["chg_pct"] >= 0 else f"{d['chg_pct']:.2f}%"
+    gain_pct = (price - cost) / cost * 100
+    gain_str = f"+{gain_pct:.1f}%" if gain_pct >= 0 else f"{gain_pct:.1f}%"
+    per_str  = f"PER:{d['per']:.1f}" if d["per"] else ""
+    signal   = trade_signal(d["position"], d["div_yield"], gain_pct)
     return (f"{name}  {format_price(ticker, price)}  前日比{chg_str}  "
-            f"取得比{gain_str}  {d['signal']}  52W:{int(d['position']*100)}%  "
-            f"{div_label(d['div_yield'])}  {per_str}")
+            f"取得比{gain_str}  52W:{int(d['position']*100)}%  "
+            f"{div_label(d['div_yield'])}  {per_str}  → {signal}")
 
 def watch_line(ticker, name, d):
     if not d or "error" in d:
         return f"{name}  データ取得失敗"
     chg_str = f"+{d['chg_pct']:.2f}%" if d["chg_pct"] >= 0 else f"{d['chg_pct']:.2f}%"
     per_str = f"PER:{d['per']:.1f}" if d["per"] else ""
+    signal  = trade_signal(d["position"], d["div_yield"])
     return (f"{name}  {format_price(ticker, d['price'])}  前日比{chg_str}  "
-            f"{d['signal']}  52W:{int(d['position']*100)}%  "
-            f"{div_label(d['div_yield'])}  {per_str}")
+            f"52W:{int(d['position']*100)}%  "
+            f"{div_label(d['div_yield'])}  {per_str}  → {signal}")
 
 # ── Notionブロックヘルパー ────────────────────────
 def h2(text):
@@ -419,17 +471,36 @@ def create_stock_page(date_str):
 # ── ニュースページ ────────────────────────────────
 def create_news_page(date_str):
     print("\n==== ニュースダイジェスト作成中 ====")
-    blocks = []
+    blocks       = []
+    all_news_for_digest = []
+
+    # 全ニュース収集
+    category_news = {}
     for category, urls in NEWS_FEEDS.items():
         print(f"  {category}...")
-        blocks.append(h2(category))
         items = get_rss_news(urls)
+        category_news[category] = items
+        for title, _ in items:
+            all_news_for_digest.append(f"{category}: {title}")
+
+    # AIダイジェストを冒頭に
+    if all_news_for_digest:
+        print("  AIダイジェスト生成中...")
+        digest = generate_news_digest("\n".join(all_news_for_digest))
+        blocks.append(h2("🗞️ 今日のニュース ダイジェスト（AI要約）"))
+        blocks.append(callout(digest, "🗞️"))
+        blocks.append(divider())
+
+    # カテゴリ別詳細
+    blocks.append(h2("📋 カテゴリ別詳細"))
+    for category, items in category_news.items():
+        blocks.append(h3(category))
         if items:
             for title, link in items:
                 blocks.append(bul(title, link or None))
         else:
             blocks.append(para("ニュース取得できませんでした"))
-        blocks.append(divider())
+    blocks.append(divider())
 
     url = create_page(f"📰 {date_str} ニュースダイジェスト", blocks, "📰")
     print(f"ニュースページ完了: {url}")
