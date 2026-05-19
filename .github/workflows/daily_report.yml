@@ -1,0 +1,36 @@
+name: 毎日リサーチ日報
+
+on:
+  # 毎朝7:30（日本時間）に自動実行 = UTC 22:30
+  schedule:
+    - cron: '30 22 * * *'
+  # 手動実行ボタン
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: '実行理由（任意）'
+        required: false
+        default: '手動実行'
+
+jobs:
+  run-report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: リポジトリを取得
+        uses: actions/checkout@v4
+
+      - name: Python セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: パッケージインストール
+        run: pip install yfinance feedparser requests google-genai
+
+      - name: 日報実行
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          NOTION_PAGE_ID: ${{ secrets.NOTION_PAGE_ID }}
+        run: python daily_report.py
