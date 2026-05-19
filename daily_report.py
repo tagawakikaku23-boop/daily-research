@@ -212,7 +212,7 @@ def generate_advice(portfolio_summary, news_summary):
 6. 📰 今日のニュースで保有銘柄・検討銘柄に影響しそうな話題"""
 
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-1.5-flash",
             contents=prompt,
         )
         return response.text
