@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 import feedparser
 from groq import Groq
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import time
 import os
 from pathlib import Path
@@ -102,7 +102,7 @@ NEWS_FEEDS = {
         "https://pc.watch.impress.co.jp/data/rss/1.0/pcw/feed.rdf",
     ],
     "🌾 新潟・地域経済": [
-        "https://www.niigata-nippo.co.jp/rss/news/",
+        "https://news.google.com/rss/search?q=新潟+経済&hl=ja&gl=JP&ceid=JP:ja",
     ],
 }
 
@@ -142,22 +142,21 @@ def get_stock_data(ticker):
     except Exception as e:
         return {"error": str(e)}
 
-# ── 銘柄ニュース取得（yfinance） ──────────────────
-def get_ticker_news(ticker, max_items=3):
+# ── 銘柄ニュース取得（Google News日本語RSS） ────────
+def get_ticker_news(company_name, max_items=3):
+    """Google NewsのRSSで日本語ニュースを取得"""
     try:
-        t    = yf.Ticker(ticker)
-        news = t.news or []
+        import urllib.parse
+        query = urllib.parse.quote(company_name.replace("★連続増配", "").replace("★連続増配", "").strip())
+        url   = f"https://news.google.com/rss/search?q={query}&hl=ja&gl=JP&ceid=JP:ja"
+        feed  = feedparser.parse(url)
         items = []
-        for n in news[:max_items]:
-            content   = n.get("content", {})
-            title     = content.get("title", n.get("title", ""))
-            link      = content.get("canonicalUrl", {}).get("url", n.get("link", ""))
-            publisher = content.get("provider", {}).get("displayName", "") or n.get("publisher", "")
-            if not link:
-                click_url = content.get("clickThroughUrl", {})
-                link = click_url.get("url", "") if isinstance(click_url, dict) else ""
+        for entry in feed.entries[:max_items]:
+            title = entry.get("title", "").strip()
+            link  = entry.get("link", "")
+            src   = entry.get("source", {}).get("title", "")
             if title:
-                label = f"[{publisher}] {title.strip()}" if publisher else title.strip()
+                label = f"[{src}] {title}" if src else title
                 items.append((label, link))
         return items
     except Exception:
@@ -394,7 +393,7 @@ def create_stock_page(date_str):
                 total_div += d["price"] * shares * d["div_yield"] / 100
 
         # 銘柄ニュース
-        ticker_news = get_ticker_news(ticker)
+        ticker_news = get_ticker_news(name)
         if ticker_news:
             for title, link in ticker_news:
                 blocks.append(bul(f"  📄 {title}", link or None))
@@ -428,7 +427,7 @@ def create_stock_page(date_str):
         blocks.append(bul(line))
         portfolio_lines.append(f"[検討] {line}")
         print(f"  [検討] {line}")
-        ticker_news = get_ticker_news(ticker, max_items=2)
+        ticker_news = get_ticker_news(name, max_items=2)
         for title, link in ticker_news:
             blocks.append(bul(f"  📄 {title}", link or None))
             news_lines.append(f"{name}: {title}")
@@ -443,7 +442,7 @@ def create_stock_page(date_str):
         blocks.append(bul(line))
         portfolio_lines.append(f"[監視] {line}")
         print(f"  [監視] {line}")
-        ticker_news = get_ticker_news(ticker, max_items=2)
+        ticker_news = get_ticker_news(name, max_items=2)
         for title, link in ticker_news:
             blocks.append(bul(f"  📄 {title}", link or None))
             news_lines.append(f"{name}: {title}")
@@ -508,7 +507,8 @@ def create_news_page(date_str):
 
 # ── メイン ────────────────────────────────────────
 def main():
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    JST = timezone(timedelta(hours=9))
+    date_str = datetime.now(JST).strftime("%Y-%m-%d")
     print(f"\n{date_str} 日報作成開始\n")
     stock_url = create_stock_page(date_str)
     news_url  = create_news_page(date_str)
