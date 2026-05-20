@@ -1,4 +1,5 @@
 .env
 log.txt
+trigger.html
 __pycache__/
 *.pyc

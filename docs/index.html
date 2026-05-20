@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>📊 日報実行</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Hiragino Sans', sans-serif;
+    background: #f7f7f5;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+  }
+  .card {
+    background: white;
+    border-radius: 16px;
+    padding: 36px;
+    text-align: center;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+    width: 320px;
+  }
+  .icon { font-size: 44px; margin-bottom: 10px; }
+  h1 { font-size: 18px; color: #1a1a1a; margin-bottom: 4px; }
+  .subtitle { font-size: 12px; color: #999; margin-bottom: 28px; }
+
+  /* セットアップ画面 */
+  #setup input {
+    width: 100%;
+    padding: 10px 14px;
+    border: 1.5px solid #ddd;
+    border-radius: 8px;
+    font-size: 13px;
+    margin-bottom: 10px;
+    outline: none;
+  }
+  #setup input:focus { border-color: #2ecc71; }
+  #setup .hint { font-size: 11px; color: #aaa; margin-bottom: 16px; text-align: left; }
+
+  /* ボタン共通 */
+  .btn {
+    background: #2ecc71;
+    color: white;
+    border: none;
+    border-radius: 10px;
+    padding: 14px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    width: 100%;
+    transition: all 0.2s;
+  }
+  .btn:hover { background: #27ae60; transform: translateY(-1px); }
+  .btn:active { transform: translateY(0); }
+  .btn:disabled { background: #b2dfdb; cursor: not-allowed; transform: none; }
+  .btn-sub {
+    background: none;
+    color: #aaa;
+    border: none;
+    font-size: 11px;
+    cursor: pointer;
+    margin-top: 16px;
+    text-decoration: underline;
+  }
+
+  /* ステータス */
+  .status {
+    margin-top: 16px;
+    padding: 10px;
+    border-radius: 8px;
+    font-size: 13px;
+    display: none;
+  }
+  .status.running { background: #fff9e6; color: #b8860b; display: block; }
+  .status.success { background: #eafaf1; color: #1e8449; display: block; }
+  .status.error   { background: #fdf2f2; color: #c0392b; display: block; }
+  .last-run { font-size: 11px; color: #bbb; margin-top: 14px; }
+
+  .spinner {
+    display: inline-block;
+    width: 12px; height: 12px;
+    border: 2px solid #b8860b;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    vertical-align: middle;
+    margin-right: 5px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="icon">📊</div>
+  <h1>毎日リサーチ日報</h1>
+  <p class="subtitle">株価・ニュース・AIアドバイスをNotionに作成</p>
+
+  <!-- セットアップ画面（初回のみ） -->
+  <div id="setup">
+    <input type="password" id="tokenInput" placeholder="GitHubトークンを入力（ghp_...）">
+    <p class="hint">※ トークンはこのブラウザにのみ保存されます</p>
+    <button class="btn" onclick="saveToken()">保存して使う</button>
+  </div>
+
+  <!-- メイン画面 -->
+  <div id="main" style="display:none">
+    <button class="btn" id="runBtn" onclick="runReport()">今すぐ実行</button>
+    <div class="status" id="status"></div>
+    <div class="last-run" id="lastRun"></div>
+    <button class="btn-sub" onclick="resetToken()">トークンをリセット</button>
+  </div>
+</div>
+
+<script>
+const OWNER    = "tagawakikaku23-boop";
+const REPO     = "daily-research";
+const WORKFLOW = "daily_report.yml";
+const TOKEN_KEY = "gh_trigger_token";
+
+function init() {
+  const token = localStorage.getItem(TOKEN_KEY);
+  if (token) {
+    document.getElementById("setup").style.display = "none";
+    document.getElementById("main").style.display  = "block";
+    const last = localStorage.getItem("lastRun");
+    if (last) document.getElementById("lastRun").textContent = "前回実行: " + last;
+  }
+}
+
+function saveToken() {
+  const token = document.getElementById("tokenInput").value.trim();
+  if (!token.startsWith("ghp_") && !token.startsWith("github_pat_")) {
+    alert("トークンの形式が正しくありません（ghp_ または github_pat_ で始まるもの）");
+    return;
+  }
+  localStorage.setItem(TOKEN_KEY, token);
+  init();
+}
+
+function resetToken() {
+  localStorage.removeItem(TOKEN_KEY);
+  document.getElementById("setup").style.display = "block";
+  document.getElementById("main").style.display  = "none";
+  document.getElementById("tokenInput").value    = "";
+}
+
+async function runReport() {
+  const token  = localStorage.getItem(TOKEN_KEY);
+  const btn    = document.getElementById("runBtn");
+  const status = document.getElementById("status");
+
+  btn.disabled    = true;
+  btn.textContent = "実行中...";
+  status.className     = "status running";
+  status.innerHTML     = '<span class="spinner"></span>GitHubに送信中...';
+
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${OWNER}/${REPO}/actions/workflows/${WORKFLOW}/dispatches`,
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Accept": "application/vnd.github.v3+json",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ ref: "main" })
+      }
+    );
+
+    if (res.status === 204) {
+      const now = new Date().toLocaleString("ja-JP");
+      localStorage.setItem("lastRun", now);
+      status.className    = "status success";
+      status.textContent  = "✅ 実行開始！2〜3分後にNotionを確認";
+      document.getElementById("lastRun").textContent = "前回実行: " + now;
+      btn.textContent = "✅ 完了";
+      setTimeout(() => { btn.disabled = false; btn.textContent = "今すぐ実行"; }, 10000);
+    } else if (res.status === 401) {
+      status.className   = "status error";
+      status.textContent = "❌ トークンが無効です。リセットして再入力してください";
+      btn.disabled = false; btn.textContent = "今すぐ実行";
+    } else {
+      throw new Error(`ステータス: ${res.status}`);
+    }
+  } catch (e) {
+    status.className   = "status error";
+    status.textContent = "❌ 失敗: " + e.message;
+    btn.disabled = false; btn.textContent = "今すぐ実行";
+  }
+}
+
+init();
+</script>
+</body>
+</html>
