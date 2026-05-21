@@ -185,6 +185,170 @@ def trade_signal(position, div_yield, gain_pct=None):
         return "🟡 継続保有（配当良好）"
     return "🟡 様子見"
 
+# ── 日経電子版スクレイピング ─────────────────────
+def get_nikkei_news(max_items=8):
+    """日経電子版にログインしてトップニュースを取得"""
+    email    = os.environ.get("NIKKEI_EMAIL", "")
+    password = os.environ.get("NIKKEI_PASSWORD", "")
+    if not email or not password:
+        return []
+    try:
+        from bs4 import BeautifulSoup
+
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/124.0.0.0 Safari/537.36",
+            "Accept-Language": "ja-JP,ja;q=0.9",
+        })
+
+        # ログインページ取得 → フォーム解析
+        login_resp = session.get("https://www.nikkei.com/login/", timeout=15)
+        soup = BeautifulSoup(login_resp.text, "html.parser")
+        form = soup.find("form")
+
+        payload     = {}
+        form_action = "https://id.nikkei.com/lounge/nl/base/LA0010.seam"
+
+        if form:
+            raw = form.get("action", "")
+            if raw:
+                form_action = raw if raw.startswith("http") else "https://id.nikkei.com" + raw
+            for inp in form.find_all("input"):
+                n = inp.get("name", "")
+                v = inp.get("value", "")
+                if n:
+                    payload[n] = v
+
+        # メール・パスワードフィールドを動的検出（見つからなければデフォルト名）
+        email_field = next(
+            (i.get("name") for i in soup.find_all("input", type=["email","text"]) if i.get("name")),
+            "LA0010Form:userID"
+        )
+        pass_field = next(
+            (i.get("name") for i in soup.find_all("input", type="password") if i.get("name")),
+            "LA0010Form:password"
+        )
+        payload[email_field] = email
+        payload[pass_field]  = password
+
+        # ログイン実行
+        session.post(form_action, data=payload, timeout=15, allow_redirects=True)
+
+        # トップページからニュース収集
+        top = session.get("https://www.nikkei.com/", timeout=15)
+        soup2 = BeautifulSoup(top.text, "html.parser")
+
+        items = []
+        seen  = set()
+        for a in soup2.find_all("a", href=True):
+            href = a.get("href", "")
+            text = a.get_text(strip=True)
+            if ("/article/" in href or "/nkd/issue/" in href) and len(text) > 8:
+                url = href if href.startswith("http") else "https://www.nikkei.com" + href
+                if text not in seen:
+                    seen.add(text)
+                    items.append((text, url))
+            if len(items) >= max_items:
+                break
+
+        return items
+    except Exception as e:
+        print(f"  日経スクレイピング失敗: {e}")
+        return []
+
+# ── 新潟日報スクレイピング ────────────────────────
+def get_niigata_nippo_news(max_items=8):
+    """新潟日報にログインして地域経済ニュースを取得"""
+    email    = os.environ.get("NIIGATA_NIPPO_EMAIL", "")
+    password = os.environ.get("NIIGATA_NIPPO_PASSWORD", "")
+    if not email or not password:
+        return []
+
+    EXCLUDE = [
+        "スポーツ","野球","サッカー","バスケ","バレー","陸上","水泳","ラグビー",
+        "高校生","中学生","小学生","子ども","こども","児童","学校","部活",
+        "甲子園","Jリーグ","プロ野球","アルビ","吹奏楽","合唱","俳句","短歌",
+    ]
+
+    try:
+        from bs4 import BeautifulSoup
+
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/124.0.0.0 Safari/537.36",
+            "Accept-Language": "ja-JP,ja;q=0.9",
+        })
+
+        # ログイン
+        login_resp = session.get("https://www.niigata-nippo.co.jp/login/", timeout=15)
+        soup = BeautifulSoup(login_resp.text, "html.parser")
+        form = soup.find("form")
+
+        payload     = {}
+        form_action = "https://www.niigata-nippo.co.jp/login/"
+
+        if form:
+            raw = form.get("action", "")
+            if raw:
+                form_action = raw if raw.startswith("http") else "https://www.niigata-nippo.co.jp" + raw
+            for inp in form.find_all("input"):
+                n = inp.get("name", "")
+                v = inp.get("value", "")
+                if n:
+                    payload[n] = v
+
+        email_field = next(
+            (i.get("name") for i in soup.find_all("input", type=["email","text"]) if i.get("name")),
+            "email"
+        )
+        pass_field = next(
+            (i.get("name") for i in soup.find_all("input", type="password") if i.get("name")),
+            "password"
+        )
+        payload[email_field] = email
+        payload[pass_field]  = password
+
+        session.post(form_action, data=payload, timeout=15, allow_redirects=True)
+
+        # 経済カテゴリページを優先
+        target_urls = [
+            "https://www.niigata-nippo.co.jp/economy/",
+            "https://www.niigata-nippo.co.jp/news/economics/",
+            "https://www.niigata-nippo.co.jp/",
+        ]
+
+        items = []
+        seen  = set()
+
+        for url in target_urls:
+            resp  = session.get(url, timeout=15)
+            soup2 = BeautifulSoup(resp.text, "html.parser")
+            for a in soup2.find_all("a", href=True):
+                href = a.get("href", "")
+                text = a.get_text(strip=True)
+                if len(text) < 8:
+                    continue
+                if any(kw in text for kw in EXCLUDE):
+                    continue
+                if "/article/" in href or "/news/" in href:
+                    full_url = href if href.startswith("http") else "https://www.niigata-nippo.co.jp" + href
+                    if text not in seen:
+                        seen.add(text)
+                        items.append((text, full_url))
+                if len(items) >= max_items:
+                    break
+            if len(items) >= max_items:
+                break
+
+        return items[:max_items]
+    except Exception as e:
+        print(f"  新潟日報スクレイピング失敗: {e}")
+        return []
+
 # ── カテゴリニュース取得（RSS） ───────────────────
 def get_rss_news(urls, max_items=5):
     items = []
@@ -473,7 +637,21 @@ def create_news_page(date_str):
     blocks       = []
     all_news_for_digest = []
 
-    # 全ニュース収集
+    # 日経新聞スクレイピング
+    print("  📰 日経新聞取得中...")
+    nikkei_items = get_nikkei_news(max_items=10)
+    if nikkei_items:
+        for title, _ in nikkei_items:
+            all_news_for_digest.append(f"日経新聞: {title}")
+
+    # 新潟日報スクレイピング
+    print("  📰 新潟日報取得中...")
+    niigata_nippo_items = get_niigata_nippo_news(max_items=8)
+    if niigata_nippo_items:
+        for title, _ in niigata_nippo_items:
+            all_news_for_digest.append(f"新潟日報: {title}")
+
+    # 全ニュース収集（RSS）
     category_news = {}
     for category, urls in NEWS_FEEDS.items():
         print(f"  {category}...")
@@ -490,14 +668,34 @@ def create_news_page(date_str):
         blocks.append(callout(digest, "🗞️"))
         blocks.append(divider())
 
+    # 日経新聞ピックアップ（ログイン成功時のみ表示）
+    if nikkei_items:
+        blocks.append(h2("📰 日経新聞ピックアップ"))
+        for title, link in nikkei_items:
+            blocks.append(bul(title, link or None))
+        blocks.append(divider())
+    elif os.environ.get("NIKKEI_EMAIL"):
+        blocks.append(h2("📰 日経新聞ピックアップ"))
+        blocks.append(para("ログインに失敗しました。メールアドレス・パスワードを確認してください。"))
+        blocks.append(divider())
+
     # カテゴリ別詳細
     blocks.append(h2("📋 カテゴリ別詳細"))
     for category, items in category_news.items():
         blocks.append(h3(category))
+        # 新潟カテゴリは新潟日報を先頭に追加
+        if category == "🌾 新潟・地域経済" and niigata_nippo_items:
+            blocks.append(para("📰 新潟日報"))
+            for title, link in niigata_nippo_items:
+                blocks.append(bul(title, link or None))
+            if items:
+                blocks.append(para("📡 その他（Google News）"))
+        elif category == "🌾 新潟・地域経済" and os.environ.get("NIIGATA_NIPPO_EMAIL"):
+            blocks.append(para("⚠️ 新潟日報ログイン失敗。メールアドレス・パスワードを確認してください。"))
         if items:
             for title, link in items:
                 blocks.append(bul(title, link or None))
-        else:
+        elif category != "🌾 新潟・地域経済" or not niigata_nippo_items:
             blocks.append(para("ニュース取得できませんでした"))
     blocks.append(divider())
 

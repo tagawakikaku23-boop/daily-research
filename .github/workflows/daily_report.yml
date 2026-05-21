@@ -26,11 +26,15 @@ jobs:
           python-version: '3.11'
 
       - name: パッケージインストール
-        run: pip install yfinance feedparser requests groq
+        run: pip install yfinance feedparser requests groq beautifulsoup4
 
       - name: 日報実行
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           NOTION_PAGE_ID: ${{ secrets.NOTION_PAGE_ID }}
+          NIKKEI_EMAIL: ${{ secrets.NIKKEI_EMAIL }}
+          NIKKEI_PASSWORD: ${{ secrets.NIKKEI_PASSWORD }}
+          NIIGATA_NIPPO_EMAIL: ${{ secrets.NIIGATA_NIPPO_EMAIL }}
+          NIIGATA_NIPPO_PASSWORD: ${{ secrets.NIIGATA_NIPPO_PASSWORD }}
         run: python daily_report.py
