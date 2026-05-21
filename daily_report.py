@@ -236,24 +236,33 @@ def get_nikkei_news(max_items=8):
         # ログイン実行
         session.post(form_action, data=payload, timeout=15, allow_redirects=True)
 
-        # トップページからニュース収集
-        top = session.get("https://www.nikkei.com/", timeout=15)
-        soup2 = BeautifulSoup(top.text, "html.parser")
+        # 複数カテゴリページを巡回
+        target_urls = [
+            "https://www.nikkei.com/",
+            "https://www.nikkei.com/economy/",
+            "https://www.nikkei.com/markets/",
+            "https://www.nikkei.com/business/",
+        ]
 
-        items = []
-        seen  = set()
-        for a in soup2.find_all("a", href=True):
-            href = a.get("href", "")
-            text = a.get_text(strip=True)
-            if ("/article/" in href or "/nkd/issue/" in href) and len(text) > 8:
-                url = href if href.startswith("http") else "https://www.nikkei.com" + href
-                if text not in seen:
-                    seen.add(text)
-                    items.append((text, url))
+        items     = []
+        seen_urls = set()
+
+        for url in target_urls:
+            resp  = session.get(url, timeout=15)
+            soup2 = BeautifulSoup(resp.text, "html.parser")
+            for a in soup2.find_all("a", href=True):
+                href = a.get("href", "")
+                text = a.get_text(strip=True)
+                if ("/article/" in href or "/nkd/issue/" in href) and len(text) > 8:
+                    full_url = href if href.startswith("http") else "https://www.nikkei.com" + href
+                    # URLで重複排除（テキストの表記ゆれを無視）
+                    if full_url not in seen_urls:
+                        seen_urls.add(full_url)
+                        items.append((text, full_url))
             if len(items) >= max_items:
                 break
 
-        return items
+        return items[:max_items]
     except Exception as e:
         print(f"  日経スクレイピング失敗: {e}")
         return []
@@ -407,6 +416,33 @@ def generate_advice(portfolio_summary, news_summary):
         return response.choices[0].message.content
     except Exception as e:
         return f"AIアドバイス生成失敗: {e}"
+
+# ── 日経ニュース専用AIコメント ────────────────────
+def generate_nikkei_analysis(nikkei_headlines):
+    try:
+        client = Groq(api_key=GROQ_API_KEY)
+        headlines_text = "\n".join(f"・{t}" for t, _ in nikkei_headlines)
+        prompt = f"""あなたは日本株・資産形成に詳しい投資家向けアドバイザーです。
+以下は今日の日経新聞のヘッドラインです。
+
+【今日の日経新聞ヘッドライン】
+{headlines_text}
+
+以下の観点で日本語で分析してください（各項目2〜3行）：
+
+1. 📌 今日の注目ニュース（投資家として最も重要な1〜2本）
+2. 📈 マーケット・株式への影響（保有株や日本株全体への影響）
+3. 🌏 マクロ経済の読み方（金利・為替・景気への示唆）
+4. 💡 個人投資家としての対応ポイント"""
+
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=600,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"日経AIコメント生成失敗: {e}"
 
 # ── ニュースダイジェスト生成 ─────────────────────
 def generate_news_digest(all_news_text):
@@ -639,7 +675,7 @@ def create_news_page(date_str):
 
     # 日経新聞スクレイピング
     print("  📰 日経新聞取得中...")
-    nikkei_items = get_nikkei_news(max_items=10)
+    nikkei_items = get_nikkei_news(max_items=15)
     if nikkei_items:
         for title, _ in nikkei_items:
             all_news_for_digest.append(f"日経新聞: {title}")
@@ -670,7 +706,11 @@ def create_news_page(date_str):
 
     # 日経新聞ピックアップ（ログイン成功時のみ表示）
     if nikkei_items:
+        print("  日経AIコメント生成中...")
+        nikkei_analysis = generate_nikkei_analysis(nikkei_items)
         blocks.append(h2("📰 日経新聞ピックアップ"))
+        blocks.append(callout(nikkei_analysis, "📰"))
+        blocks.append(h3("📋 今日の日経ヘッドライン"))
         for title, link in nikkei_items:
             blocks.append(bul(title, link or None))
         blocks.append(divider())
