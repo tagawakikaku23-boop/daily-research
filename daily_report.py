@@ -291,8 +291,8 @@ def get_niigata_nippo_news(max_items=8):
             page.set_extra_http_headers({"Accept-Language": "ja-JP,ja;q=0.9"})
 
             print("  新潟日報: ページ読み込み中...")
-            page.goto("https://www.niigata-nippo.co.jp/", timeout=30000)
-            page.wait_for_load_state("networkidle", timeout=15000)
+            page.goto("https://www.niigata-nippo.co.jp/", timeout=30000, wait_until="domcontentloaded")
+            page.wait_for_timeout(2000)
 
             # ログインボタンを探してクリック（モーダルを開く）
             for selector in ["text=ログイン", "a[href*='login']", ".login", "#login-btn", "button:has-text('ログイン')"]:
@@ -303,7 +303,7 @@ def get_niigata_nippo_news(max_items=8):
                 except Exception:
                     continue
 
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(2000)
 
             # メールアドレス入力
             for sel in ["input[type='email']", "input[name='email']", "input[name='userId']", "input[placeholder*='メール']"]:
@@ -332,7 +332,7 @@ def get_niigata_nippo_news(max_items=8):
                 except Exception:
                     continue
 
-            page.wait_for_load_state("networkidle", timeout=15000)
+            page.wait_for_timeout(3000)
             print(f"  ログイン後URL: {page.url}")
 
             # 記事収集
@@ -344,8 +344,8 @@ def get_niigata_nippo_news(max_items=8):
             ]
 
             for url in target_urls:
-                page.goto(url, timeout=20000)
-                page.wait_for_load_state("networkidle", timeout=10000)
+                page.goto(url, timeout=20000, wait_until="domcontentloaded")
+                page.wait_for_timeout(2000)
                 soup = BeautifulSoup(page.content(), "html.parser")
                 for a in soup.find_all("a", href=True):
                     href = a.get("href", "")
