@@ -292,23 +292,44 @@ def get_niigata_nippo_news(max_items=8):
             "Accept-Language": "ja-JP,ja;q=0.9",
         })
 
-        # ログイン
-        login_resp = session.get("https://www.niigata-nippo.co.jp/login/", timeout=15)
-        soup = BeautifulSoup(login_resp.text, "html.parser")
-        form = soup.find("form")
+        # ログインページ候補を順に試す
+        login_candidates = [
+            "https://www.niigata-nippo.co.jp/login/",
+            "https://www.niigata-nippo.co.jp/member/login/",
+            "https://www.niigata-nippo.co.jp/user/login/",
+            "https://www.niigata-nippo.co.jp/account/login/",
+        ]
+        soup       = None
+        form       = None
+        login_page_url = None
+        for candidate in login_candidates:
+            r = session.get(candidate, timeout=15)
+            print(f"  新潟日報ログインページ試行: {candidate} → {r.status_code}")
+            s = BeautifulSoup(r.text, "html.parser")
+            f = s.find("form")
+            if f:
+                soup           = s
+                form           = f
+                login_page_url = candidate
+                print(f"  フォーム発見: action={f.get('action','')}, fields={[i.get('name') for i in f.find_all('input') if i.get('name')]}")
+                break
+
+        if not form:
+            print("  新潟日報: ログインフォームが見つかりませんでした（JavaScript認証の可能性）")
+            return []
 
         payload     = {}
-        form_action = "https://www.niigata-nippo.co.jp/login/"
+        form_action = login_page_url
 
-        if form:
-            raw = form.get("action", "")
-            if raw:
-                form_action = raw if raw.startswith("http") else "https://www.niigata-nippo.co.jp" + raw
-            for inp in form.find_all("input"):
-                n = inp.get("name", "")
-                v = inp.get("value", "")
-                if n:
-                    payload[n] = v
+        raw = form.get("action", "")
+        if raw:
+            form_action = raw if raw.startswith("http") else "https://www.niigata-nippo.co.jp" + raw
+
+        for inp in form.find_all("input"):
+            n = inp.get("name", "")
+            v = inp.get("value", "")
+            if n:
+                payload[n] = v
 
         email_field = next(
             (i.get("name") for i in soup.find_all("input", type=["email","text"]) if i.get("name")),
@@ -321,7 +342,8 @@ def get_niigata_nippo_news(max_items=8):
         payload[email_field] = email
         payload[pass_field]  = password
 
-        session.post(form_action, data=payload, timeout=15, allow_redirects=True)
+        login_result = session.post(form_action, data=payload, timeout=15, allow_redirects=True)
+        print(f"  新潟日報ログイン結果: {login_result.status_code} → {login_result.url}")
 
         # 経済カテゴリページを優先
         target_urls = [
@@ -451,21 +473,25 @@ def generate_news_digest(all_news_text):
     try:
         client = Groq(api_key=GROQ_API_KEY)
         prompt = f"""以下は今日の各カテゴリのニュース一覧です。
-投資家・個人の資産形成に関心がある人向けに、特に重要なニュースを5点に絞って日本語で要約してください。
-経済・マーケット・テクノロジー・地域ニュースをバランスよく取り上げてください。
-各項目は1〜2行で簡潔に。
+個人事業主・投資家・時事に関心がある人向けに、今日の重要ニュースを幅広く取り上げて日本語で解説してください。
+経済・政治・国際・テクノロジー・地域ニュースをバランスよくカバーしてください。
 
 【今日のニュース一覧】
 {all_news_text}
 
-形式：
-• [カテゴリ] 要約文
-• [カテゴリ] 要約文
-（5点）"""
+以下の形式で25〜30点を取り上げてください。各項目は2〜3行で背景・意味・影響まで踏み込んで解説すること。
+
+• [カテゴリ] 見出し
+  → 解説文（2〜3行）
+
+• [カテゴリ] 見出し
+  → 解説文（2〜3行）
+
+（25〜30点）"""
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=400,
+            max_tokens=3000,
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -693,7 +719,7 @@ def create_news_page(date_str):
     category_news = {}
     for category, urls in NEWS_FEEDS.items():
         print(f"  {category}...")
-        items = get_rss_news(urls)
+        items = get_rss_news(urls, max_items=10)
         category_news[category] = items
         for title, _ in items:
             all_news_for_digest.append(f"{category}: {title}")
