@@ -269,7 +269,7 @@ def get_nikkei_news(max_items=8):
 
 # ── 新潟日報スクレイピング ────────────────────────
 def get_niigata_nippo_news(max_items=8):
-    """新潟日報にログインして地域経済ニュースを取得"""
+    """新潟日報にPlaywrightでログインして地域経済ニュースを取得"""
     email    = os.environ.get("NIIGATA_NIPPO_EMAIL", "")
     password = os.environ.get("NIIGATA_NIPPO_PASSWORD", "")
     if not email or not password:
@@ -282,100 +282,90 @@ def get_niigata_nippo_news(max_items=8):
     ]
 
     try:
+        from playwright.sync_api import sync_playwright
         from bs4 import BeautifulSoup
 
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) "
-                          "Chrome/124.0.0.0 Safari/537.36",
-            "Accept-Language": "ja-JP,ja;q=0.9",
-        })
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page    = browser.new_page()
+            page.set_extra_http_headers({"Accept-Language": "ja-JP,ja;q=0.9"})
 
-        # ログインページ候補を順に試す
-        login_candidates = [
-            "https://www.niigata-nippo.co.jp/login/",
-            "https://www.niigata-nippo.co.jp/member/login/",
-            "https://www.niigata-nippo.co.jp/user/login/",
-            "https://www.niigata-nippo.co.jp/account/login/",
-        ]
-        soup       = None
-        form       = None
-        login_page_url = None
-        for candidate in login_candidates:
-            r = session.get(candidate, timeout=15)
-            print(f"  新潟日報ログインページ試行: {candidate} → {r.status_code}")
-            s = BeautifulSoup(r.text, "html.parser")
-            f = s.find("form")
-            if f:
-                soup           = s
-                form           = f
-                login_page_url = candidate
-                print(f"  フォーム発見: action={f.get('action','')}, fields={[i.get('name') for i in f.find_all('input') if i.get('name')]}")
-                break
+            print("  新潟日報: ページ読み込み中...")
+            page.goto("https://www.niigata-nippo.co.jp/", timeout=30000)
+            page.wait_for_load_state("networkidle", timeout=15000)
 
-        if not form:
-            print("  新潟日報: ログインフォームが見つかりませんでした（JavaScript認証の可能性）")
-            return []
-
-        payload     = {}
-        form_action = login_page_url
-
-        raw = form.get("action", "")
-        if raw:
-            form_action = raw if raw.startswith("http") else "https://www.niigata-nippo.co.jp" + raw
-
-        for inp in form.find_all("input"):
-            n = inp.get("name", "")
-            v = inp.get("value", "")
-            if n:
-                payload[n] = v
-
-        email_field = next(
-            (i.get("name") for i in soup.find_all("input", type=["email","text"]) if i.get("name")),
-            "email"
-        )
-        pass_field = next(
-            (i.get("name") for i in soup.find_all("input", type="password") if i.get("name")),
-            "password"
-        )
-        payload[email_field] = email
-        payload[pass_field]  = password
-
-        login_result = session.post(form_action, data=payload, timeout=15, allow_redirects=True)
-        print(f"  新潟日報ログイン結果: {login_result.status_code} → {login_result.url}")
-
-        # 経済カテゴリページを優先
-        target_urls = [
-            "https://www.niigata-nippo.co.jp/economy/",
-            "https://www.niigata-nippo.co.jp/news/economics/",
-            "https://www.niigata-nippo.co.jp/",
-        ]
-
-        items = []
-        seen  = set()
-
-        for url in target_urls:
-            resp  = session.get(url, timeout=15)
-            soup2 = BeautifulSoup(resp.text, "html.parser")
-            for a in soup2.find_all("a", href=True):
-                href = a.get("href", "")
-                text = a.get_text(strip=True)
-                if len(text) < 8:
+            # ログインボタンを探してクリック（モーダルを開く）
+            for selector in ["text=ログイン", "a[href*='login']", ".login", "#login-btn", "button:has-text('ログイン')"]:
+                try:
+                    page.click(selector, timeout=3000)
+                    print(f"  ログインボタン発見: {selector}")
+                    break
+                except Exception:
                     continue
-                if any(kw in text for kw in EXCLUDE):
+
+            page.wait_for_timeout(1500)
+
+            # メールアドレス入力
+            for sel in ["input[type='email']", "input[name='email']", "input[name='userId']", "input[placeholder*='メール']"]:
+                try:
+                    page.fill(sel, email, timeout=3000)
+                    print(f"  メール欄発見: {sel}")
+                    break
+                except Exception:
                     continue
-                if "/article/" in href or "/news/" in href:
-                    full_url = href if href.startswith("http") else "https://www.niigata-nippo.co.jp" + href
-                    if text not in seen:
-                        seen.add(text)
-                        items.append((text, full_url))
+
+            # パスワード入力
+            for sel in ["input[type='password']", "input[name='password']"]:
+                try:
+                    page.fill(sel, password, timeout=3000)
+                    print(f"  パスワード欄発見: {sel}")
+                    break
+                except Exception:
+                    continue
+
+            # 送信
+            for sel in ["button[type='submit']", "input[type='submit']", "button:has-text('ログイン')", "button:has-text('サインイン')"]:
+                try:
+                    page.click(sel, timeout=3000)
+                    print(f"  送信ボタン発見: {sel}")
+                    break
+                except Exception:
+                    continue
+
+            page.wait_for_load_state("networkidle", timeout=15000)
+            print(f"  ログイン後URL: {page.url}")
+
+            # 記事収集
+            items     = []
+            seen_urls = set()
+            target_urls = [
+                "https://www.niigata-nippo.co.jp/economy/",
+                "https://www.niigata-nippo.co.jp/",
+            ]
+
+            for url in target_urls:
+                page.goto(url, timeout=20000)
+                page.wait_for_load_state("networkidle", timeout=10000)
+                soup = BeautifulSoup(page.content(), "html.parser")
+                for a in soup.find_all("a", href=True):
+                    href = a.get("href", "")
+                    text = a.get_text(strip=True)
+                    if len(text) < 8 or any(kw in text for kw in EXCLUDE):
+                        continue
+                    if "/article/" in href or "/news/" in href:
+                        full_url = href if href.startswith("http") else "https://www.niigata-nippo.co.jp" + href
+                        if full_url not in seen_urls:
+                            seen_urls.add(full_url)
+                            items.append((text, full_url))
+                    if len(items) >= max_items:
+                        break
                 if len(items) >= max_items:
                     break
-            if len(items) >= max_items:
-                break
 
-        return items[:max_items]
+            browser.close()
+            print(f"  新潟日報: {len(items)}件取得")
+            return items[:max_items]
+
     except Exception as e:
         print(f"  新潟日報スクレイピング失敗: {e}")
         return []

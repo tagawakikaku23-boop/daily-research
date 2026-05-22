@@ -26,7 +26,10 @@ jobs:
           python-version: '3.11'
 
       - name: パッケージインストール
-        run: pip install yfinance feedparser requests groq beautifulsoup4
+        run: pip install yfinance feedparser requests groq beautifulsoup4 playwright
+
+      - name: Playwright Chromiumインストール
+        run: playwright install chromium --with-deps
 
       - name: 日報実行
         env:
