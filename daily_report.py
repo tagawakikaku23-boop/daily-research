@@ -552,6 +552,31 @@ def callout(text, emoji="💡"):
             "callout":{"rich_text":[{"type":"text","text":{"content":text[:2000]}}],
                        "icon":{"type":"emoji","emoji":emoji}}}
 
+def long_text_blocks(text, emoji=None):
+    """2000文字を超えるテキストを複数のブロックに分割して返す"""
+    blocks = []
+    # 行ごとに分割して2000文字以内にまとめる
+    lines   = text.splitlines(keepends=True)
+    chunk   = ""
+    first   = True
+    for line in lines:
+        if len(chunk) + len(line) > 1900:
+            if chunk.strip():
+                if first and emoji:
+                    blocks.append(callout(chunk.strip(), emoji))
+                    first = False
+                else:
+                    blocks.append(para(chunk.strip()))
+            chunk = line
+        else:
+            chunk += line
+    if chunk.strip():
+        if first and emoji:
+            blocks.append(callout(chunk.strip(), emoji))
+        else:
+            blocks.append(para(chunk.strip()))
+    return blocks
+
 def quote(text):
     return {"object":"block","type":"quote",
             "quote":{"rich_text":[{"type":"text","text":{"content":text[:2000]}}]}}
@@ -684,11 +709,7 @@ def create_stock_page(date_str):
     advice_text       = generate_advice(portfolio_summary, news_summary)
     print(f"  アドバイス生成完了")
 
-    advice_blocks = [
-        h2("🤖 今日のAIアドバイス"),
-        callout(advice_text, "🤖"),
-        divider(),
-    ]
+    advice_blocks = [h2("🤖 今日のAIアドバイス")] + long_text_blocks(advice_text, "🤖") + [divider()]
     blocks = advice_blocks + blocks
 
     url = create_page(f"📈 {date_str} 株式レポート", blocks, "📈")
@@ -729,7 +750,7 @@ def create_news_page(date_str):
         print("  AIダイジェスト生成中...")
         digest = generate_news_digest("\n".join(all_news_for_digest))
         blocks.append(h2("🗞️ 今日のニュース ダイジェスト（AI要約）"))
-        blocks.append(callout(digest, "🗞️"))
+        blocks.extend(long_text_blocks(digest, "🗞️"))
         blocks.append(divider())
 
     # 日経新聞ピックアップ（ログイン成功時のみ表示）
@@ -737,7 +758,7 @@ def create_news_page(date_str):
         print("  日経AIコメント生成中...")
         nikkei_analysis = generate_nikkei_analysis(nikkei_items)
         blocks.append(h2("📰 日経新聞ピックアップ"))
-        blocks.append(callout(nikkei_analysis, "📰"))
+        blocks.extend(long_text_blocks(nikkei_analysis, "📰"))
         blocks.append(h3("📋 今日の日経ヘッドライン"))
         for title, link in nikkei_items:
             blocks.append(bul(title, link or None))
