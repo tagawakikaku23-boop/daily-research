@@ -333,6 +333,40 @@ def get_niigata_nippo_news(max_items=8):
                     continue
 
             page.wait_for_timeout(3000)
+            print(f"  送信後URL: {page.url}")
+
+            # auth.niigata-nippo.co.jp にリダイレクトされた場合（2段階認証フロー）
+            if "auth.niigata-nippo.co.jp" in page.url:
+                print("  認証サブドメインを検出、2段階目の入力を試みます...")
+                for sel in ["input[type='email']", "input[name='email']", "input[name='username']", "input[name='userId']"]:
+                    try:
+                        if page.locator(sel).count() > 0:
+                            page.fill(sel, email, timeout=3000)
+                            print(f"  認証ページ メール欄: {sel}")
+                            break
+                    except Exception:
+                        continue
+
+                for sel in ["input[type='password']", "input[name='password']"]:
+                    try:
+                        if page.locator(sel).count() > 0:
+                            page.fill(sel, password, timeout=3000)
+                            print(f"  認証ページ パスワード欄: {sel}")
+                            break
+                    except Exception:
+                        continue
+
+                for sel in ["button[type='submit']", "input[type='submit']", "button:has-text('ログイン')", "button:has-text('次へ')"]:
+                    try:
+                        page.click(sel, timeout=3000)
+                        print(f"  認証ページ 送信: {sel}")
+                        break
+                    except Exception:
+                        continue
+
+                page.wait_for_timeout(4000)
+                print(f"  認証完了後URL: {page.url}")
+
             print(f"  ログイン後URL: {page.url}")
 
             # 記事収集
@@ -352,9 +386,14 @@ def get_niigata_nippo_news(max_items=8):
                     text = a.get_text(strip=True)
                     if len(text) < 8 or any(kw in text for kw in EXCLUDE):
                         continue
-                    if "/article/" in href or "/news/" in href:
+                    is_article = (
+                        "/article/" in href or "/news/" in href
+                        or "/topics/" in href or "/local/" in href
+                        or (href.startswith("/") and any(c.isdigit() for c in href) and "." not in href.split("/")[-1])
+                    )
+                    if is_article and "niigata-nippo.co.jp" not in href.replace("www.niigata-nippo.co.jp",""):
                         full_url = href if href.startswith("http") else "https://www.niigata-nippo.co.jp" + href
-                        if full_url not in seen_urls:
+                        if "niigata-nippo.co.jp" in full_url and full_url not in seen_urls:
                             seen_urls.add(full_url)
                             items.append((text, full_url))
                     if len(items) >= max_items:
