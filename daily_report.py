@@ -377,6 +377,7 @@ def get_niigata_nippo_news(max_items=8):
                 "https://www.niigata-nippo.co.jp/",
             ]
 
+            import re
             for url in target_urls:
                 page.goto(url, timeout=20000, wait_until="domcontentloaded")
                 page.wait_for_timeout(2000)
@@ -386,20 +387,28 @@ def get_niigata_nippo_news(max_items=8):
                     text = a.get_text(strip=True)
                     if len(text) < 8 or any(kw in text for kw in EXCLUDE):
                         continue
-                    is_article = (
-                        "/article/" in href or "/news/" in href
-                        or "/topics/" in href or "/local/" in href
-                        or (href.startswith("/") and any(c.isdigit() for c in href) and "." not in href.split("/")[-1])
-                    )
-                    if is_article and "niigata-nippo.co.jp" not in href.replace("www.niigata-nippo.co.jp",""):
-                        full_url = href if href.startswith("http") else "https://www.niigata-nippo.co.jp" + href
-                        if "niigata-nippo.co.jp" in full_url and full_url not in seen_urls:
-                            seen_urls.add(full_url)
-                            items.append((text, full_url))
+                    # カテゴリ・タグページを除外、記事URLのみ（数字IDを含むパス）
+                    if "/category/" in href or "/tag/" in href or "/author/" in href:
+                        continue
+                    is_article = bool(re.search(r'/\d{5,}', href)) or "/articles/" in href
+                    if not is_article:
+                        continue
+                    full_url = href if href.startswith("http") else "https://www.niigata-nippo.co.jp" + href
+                    if "niigata-nippo.co.jp" in full_url and full_url not in seen_urls:
+                        seen_urls.add(full_url)
+                        items.append((text, full_url))
                     if len(items) >= max_items:
                         break
                 if len(items) >= max_items:
                     break
+
+            # 記事が取れなかった場合はトップページのhref全体をデバッグ出力
+            if not items:
+                page.goto("https://www.niigata-nippo.co.jp/", timeout=20000, wait_until="domcontentloaded")
+                page.wait_for_timeout(2000)
+                soup = BeautifulSoup(page.content(), "html.parser")
+                sample = [a.get("href","") for a in soup.find_all("a", href=True) if len(a.get("href","")) > 10][:20]
+                print(f"  新潟日報サンプルURL: {sample}")
 
             browser.close()
             print(f"  新潟日報: {len(items)}件取得")
