@@ -554,7 +554,10 @@ def holding_line(ticker, name, shares, cost, d):
     chg_str  = f"+{d['chg_pct']:.2f}%" if d["chg_pct"] >= 0 else f"{d['chg_pct']:.2f}%"
     gain_pct = (price - cost) / cost * 100
     gain_str = f"+{gain_pct:.1f}%" if gain_pct >= 0 else f"{gain_pct:.1f}%"
-    per_str  = f"PER:{d['per']:.1f}" if d["per"] else ""
+    try:
+        per_str = f"PER:{float(d['per']):.1f}" if d["per"] else ""
+    except (ValueError, TypeError):
+        per_str = ""
     signal   = trade_signal(d["position"], d["div_yield"], gain_pct)
     return (f"{name}  {format_price(ticker, price)}  前日比{chg_str}  "
             f"取得比{gain_str}  52W:{int(d['position']*100)}%  "
@@ -564,7 +567,10 @@ def watch_line(ticker, name, d):
     if not d or "error" in d:
         return f"{name}  データ取得失敗"
     chg_str = f"+{d['chg_pct']:.2f}%" if d["chg_pct"] >= 0 else f"{d['chg_pct']:.2f}%"
-    per_str = f"PER:{d['per']:.1f}" if d["per"] else ""
+    try:
+        per_str = f"PER:{float(d['per']):.1f}" if d["per"] else ""
+    except (ValueError, TypeError):
+        per_str = ""
     signal  = trade_signal(d["position"], d["div_yield"])
     return (f"{name}  {format_price(ticker, d['price'])}  前日比{chg_str}  "
             f"52W:{int(d['position']*100)}%  "
