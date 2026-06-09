@@ -27,6 +27,8 @@ if env_path.exists():
 NOTION_API_KEY = os.environ["NOTION_API_KEY"]
 PARENT_PAGE_ID = os.environ["NOTION_PAGE_ID"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+# レポート格納先データベース（第3-4弾④：氾濫対策）。未設定なら従来どおりページ直下に作成
+NOTION_DB_ID = os.environ.get("NOTION_DB_ID", "37afc83b-0e47-81d4-901d-d20a958122e0")
 
 # インデックス
 INDICES = [
@@ -1104,18 +1106,37 @@ def para(text):
 def divider():
     return {"object":"block","type":"divider","divider":{}}
 
+# アイコン→「種類」セレクト値の対応（DB分類用）
+_ICON_KIND = {"🌅": "🌅 朝", "🌙": "🌙 夜", "🔄": "🔄 手動", "📰": "📰 ニュース"}
+
 def create_page(title, blocks, icon="📋"):
     headers = {
         "Authorization": f"Bearer {NOTION_API_KEY}",
         "Content-Type":  "application/json",
         "Notion-Version": "2022-06-28",
     }
-    data = {
-        "parent": {"page_id": PARENT_PAGE_ID},
-        "icon":   {"type":"emoji","emoji":icon},
-        "properties": {"title":{"title":[{"text":{"content":title}}]}},
-        "children": blocks[:100],
-    }
+    # DBが設定されていれば、日付・種類プロパティ付きでデータベースに登録（一覧で並べ替え/絞り込み可能）
+    if NOTION_DB_ID:
+        # タイトル先頭の YYYY-MM-DD を日付プロパティに使う
+        date_val = title[:10] if len(title) >= 10 and title[4] == "-" else None
+        props = {"名前": {"title": [{"text": {"content": title}}]}}
+        if date_val:
+            props["日付"] = {"date": {"start": date_val}}
+        if icon in _ICON_KIND:
+            props["種類"] = {"select": {"name": _ICON_KIND[icon]}}
+        data = {
+            "parent": {"database_id": NOTION_DB_ID},
+            "icon":   {"type": "emoji", "emoji": icon},
+            "properties": props,
+            "children": blocks[:100],
+        }
+    else:
+        data = {
+            "parent": {"page_id": PARENT_PAGE_ID},
+            "icon":   {"type":"emoji","emoji":icon},
+            "properties": {"title":{"title":[{"text":{"content":title}}]}},
+            "children": blocks[:100],
+        }
     resp = requests.post("https://api.notion.com/v1/pages", headers=headers, json=data)
     resp.raise_for_status()
     pid = resp.json()["id"]
