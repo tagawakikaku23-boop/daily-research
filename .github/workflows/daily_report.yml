@@ -1,16 +1,17 @@
 name: 毎日リサーチ日報
 
 on:
-  # 毎朝7:30（日本時間）に自動実行 = UTC 22:30
+  # 朝07:00（JST）= UTC 22:00 ／ 夜19:00（JST）= UTC 10:00
   schedule:
-    - cron: '30 22 * * *'
-  # 手動実行ボタン
+    - cron: '0 22 * * *'   # 朝レポート
+    - cron: '0 10 * * *'   # 夜レポート
+  # 手動実行（trigger.html のボタン）。mode未指定なら manual
   workflow_dispatch:
     inputs:
-      reason:
-        description: '実行理由（任意）'
+      mode:
+        description: '実行モード（morning / evening / manual）'
         required: false
-        default: '手動実行'
+        default: 'manual'
 
 jobs:
   run-report:
@@ -31,7 +32,18 @@ jobs:
       - name: Playwright Chromiumインストール
         run: playwright install chromium --with-deps
 
-      - name: 日報実行
+      - name: 実行モード決定（朝/夜/手動）
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "0 22 * * *" ]; then
+            echo "mode=morning" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=evening" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 日報実行（${{ steps.mode.outputs.mode }}）
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -40,4 +52,4 @@ jobs:
           NIKKEI_PASSWORD: ${{ secrets.NIKKEI_PASSWORD }}
           NIIGATA_NIPPO_EMAIL: ${{ secrets.NIIGATA_NIPPO_EMAIL }}
           NIIGATA_NIPPO_PASSWORD: ${{ secrets.NIIGATA_NIPPO_PASSWORD }}
-        run: python daily_report.py
+        run: python daily_report.py ${{ steps.mode.outputs.mode }}

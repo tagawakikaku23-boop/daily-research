@@ -1,5 +1,8 @@
 .env
 log.txt
 trigger.html
+last_snapshot.json
+run_morning.bat
+run_evening.bat
 __pycache__/
 *.pyc

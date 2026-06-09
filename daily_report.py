@@ -111,13 +111,29 @@ def get_stock_data(ticker):
     try:
         t    = yf.Ticker(ticker)
         info = t.info
-        hist = t.history(period="2d")
+        # 週間騰落率・高値からの下落率も計算するため少し長めに取得
+        hist = t.history(period="1mo")
         if len(hist) < 1:
             return None
 
-        price   = hist["Close"].iloc[-1]
-        prev    = hist["Close"].iloc[-2] if len(hist) >= 2 else price
+        closes  = hist["Close"]
+        price   = closes.iloc[-1]
+        prev    = closes.iloc[-2] if len(closes) >= 2 else price
         chg_pct = (price - prev) / prev * 100
+
+        # 週間騰落率（直近5営業日前との比較）
+        week_ago    = closes.iloc[-6] if len(closes) >= 6 else closes.iloc[0]
+        week_chg    = (price - week_ago) / week_ago * 100 if week_ago else 0
+        # 直近高値からの下落率（過去1ヶ月のピーク対比）
+        recent_high = closes.max()
+        drop_high   = (price - recent_high) / recent_high * 100 if recent_high else 0
+
+        # 取得時刻（最新足の日付）
+        try:
+            asof = closes.index[-1].strftime("%m/%d")
+        except Exception:
+            asof = ""
+
         low52   = info.get("fiftyTwoWeekLow", price)
         high52  = info.get("fiftyTwoWeekHigh", price)
         div_yield = info.get("dividendYield") or 0
@@ -138,52 +154,271 @@ def get_stock_data(ticker):
             "low52": low52, "high52": high52,
             "position": position, "div_yield": div_yield,
             "per": per, "signal": signal,
+            "week_chg": week_chg, "drop_high": drop_high, "asof": asof,
         }
     except Exception as e:
         return {"error": str(e)}
 
-# ── 銘柄ニュース取得（Google News日本語RSS） ────────
+# ── マクロ環境スナップショット（yfinanceで機械取得） ──
+MACRO_TICKERS = [
+    ("^DJI",  "NYダウ"),
+    ("^GSPC", "S&P500"),
+    ("^IXIC", "NASDAQ"),
+    ("^SOX",  "SOX(半導体)"),
+]
+
+def get_macro_snapshot():
+    """米国市場・SOX・ドル円・日経3日推移を機械取得（出典=Yahoo Finance）"""
+    snap = {"us": [], "usdjpy": None, "nikkei_3d": [], "asof": ""}
+    JST = timezone(timedelta(hours=9))
+    snap["asof"] = datetime.now(JST).strftime("%Y-%m-%d %H:%M")
+    # 米国主要指数＋SOX
+    for tk, name in MACRO_TICKERS:
+        d = get_stock_data(tk)
+        if d and "error" not in d:
+            snap["us"].append((name, d["price"], d["chg_pct"], d.get("asof", "")))
+    # ドル円
+    try:
+        fx = yf.Ticker("JPY=X").history(period="5d")["Close"]
+        if len(fx) >= 1:
+            cur = fx.iloc[-1]
+            prv = fx.iloc[-2] if len(fx) >= 2 else cur
+            snap["usdjpy"] = (cur, (cur - prv) / prv * 100)
+    except Exception:
+        pass
+    # 日経 直近3営業日の終値推移＋前日比（円・%を整合させて1か所で算出）
+    try:
+        nk = yf.Ticker("^N225").history(period="10d")["Close"]
+        for i in range(max(0, len(nk) - 3), len(nk)):
+            snap["nikkei_3d"].append((nk.index[i].strftime("%m/%d"), nk.iloc[i]))
+        if len(nk) >= 2:
+            cur, prv = nk.iloc[-1], nk.iloc[-2]
+            snap["nikkei"] = {
+                "close": cur, "chg_yen": cur - prv,
+                "chg_pct": (cur - prv) / prv * 100,
+                "asof": nk.index[-1].strftime("%m/%d"),
+            }
+    except Exception:
+        pass
+    return snap
+
+def get_usdjpy_rate():
+    """米国ETF円換算用のドル円レート"""
+    try:
+        fx = yf.Ticker("JPY=X").history(period="5d")["Close"]
+        return float(fx.iloc[-1]) if len(fx) >= 1 else None
+    except Exception:
+        return None
+
+# ── マクロ「理由」ニュース（Google News RSS・出典付き） ──
+def get_macro_news(mode="morning", max_items=8):
+    """相場が動いた理由を探すためのニュース見出しを出典付きで収集"""
+    if mode == "morning":
+        queries = [
+            "日経平均 今日 見通し", "米国株 ダウ ナスダック 終値",
+            "ドル円 為替 今日", "今週 経済指標 スケジュール 日米",
+        ]
+    else:
+        queries = [
+            "日経平均 今日 終値 理由", "東証 今日 値上がり 値下がり セクター",
+            "ドル円 今日 終値", "明日 注目 経済指標",
+        ]
+    import urllib.parse
+    items, seen = [], set()
+    for q in queries:
+        try:
+            url  = f"https://news.google.com/rss/search?q={urllib.parse.quote(q)}&hl=ja&gl=JP&ceid=JP:ja"
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:3]:
+                title = entry.get("title", "").strip()
+                link  = entry.get("link", "")
+                src   = entry.get("source", {}).get("title", "")
+                if title and not is_noise_news(title) and title not in seen:
+                    seen.add(title)
+                    items.append((f"[{src}] {title}" if src else title, link))
+        except Exception:
+            continue
+    return items[:max_items]
+
+def macro_snapshot_text(snap):
+    """マクロスナップショットを人間/AIが読めるテキストに整形"""
+    lines = [f"取得時刻: {snap.get('asof','')}"]
+    for name, price, chg, _asof in snap.get("us", []):
+        lines.append(f"{name}: {price:,.2f} ({'+' if chg>=0 else ''}{chg:.2f}%)")
+    if snap.get("usdjpy"):
+        cur, chg = snap["usdjpy"]
+        lines.append(f"ドル円: {cur:.2f} ({'+' if chg>=0 else ''}{chg:.2f}%)")
+    if snap.get("nikkei"):
+        nk = snap["nikkei"]
+        sign = "+" if nk["chg_yen"] >= 0 else ""
+        lines.append(f"日経平均 終値({nk['asof']}): {nk['close']:,.0f}円 "
+                     f"前日比{sign}{nk['chg_yen']:,.0f}円 ({sign}{nk['chg_pct']:.2f}%)")
+    if snap.get("nikkei_3d"):
+        seq = " → ".join(f"{day} {v:,.0f}" for day, v in snap["nikkei_3d"])
+        lines.append(f"日経平均 直近推移: {seq}")
+    return "\n".join(lines)
+
+# ── 差分（前回レポートとの比較）スナップショット ─────────
+SNAP_FILE = Path(__file__).parent / "last_snapshot.json"
+
+def load_prev_snapshot():
+    try:
+        import json
+        return json.loads(SNAP_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def save_snapshot(snap):
+    try:
+        import json
+        SNAP_FILE.write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+def diff_lines(prev, cur):
+    """前回と今回の銘柄シグナルを比較して変化点を返す"""
+    out = []
+    for name, sig in cur.items():
+        old = prev.get(name)
+        if old and old != sig:
+            out.append(f"{name}: {old} → {sig}")
+    return out
+
+# ── ニュース選別ルール（指示書セクション4／第2弾②） ───────
+# 株価に影響しないノイズ（スポーツ・イベント・CSR等）は除外
+NEWS_EXCLUDE = [
+    # スポーツ全般
+    "スポーツ", "野球", "プロ野球", "サッカー", "Jリーグ", "ゴルフ", "テニス",
+    "バスケ", "バレー", "陸上", "水泳", "ラグビー", "五輪", "オリンピック",
+    # 野球・試合まわりの語（球団名一致対策で強めに）
+    "監督", "選手", "試合", "打席", "投手", "登板", "好投", "完投", "完封",
+    "打線", "打者", "本塁打", "ホームラン", "安打", "失点", "無失点", "防御率",
+    "勝利投手", "敗戦", "サヨナラ", "ドラフト", "スタジアム", "ファインプレー",
+    "本拠地", "球団", "ユニホーム", "ユニフォーム", "開幕", "シーズン", "ナイン",
+    "夏の陣", "交流戦", "クライマックス", "日本シリーズ", "リーグ優勝",
+    # ゴルフ・順位
+    "ツアー", "プレーオフ", "予選通過", "首位", "優勝", "連敗", "連勝", "敗退",
+    # イベント・CSR
+    "スポンサー", "コラボ", "イベント", "寄付", "CSR", "チャリティ", "ファンクラブ",
+    "コンサート", "ライブ", "握手会", "グッズ", "ファンミーティング", "ファン感謝",
+    "甲子園", "アルビ", "観戦", "始球式", "応援",
+]
+
+# 球団・スポーツチームを持つ企業＝社名一致でスポーツ記事が大量に混入する。
+# これらはホワイトリスト（業績・配当・M&A等）に該当する記事のみ採用する。
+SPORTS_HEAVY = ["オリックス", "ソフトバンク", "楽天", "DeNA", "日本ハム",
+                "阪神", "中日", "巨人", "ヤクルト", "西武", "ロッテ"]
+# 配当・業績を脅かす重大リスク（評価に必ず反映）
+NEWS_RISK = {
+    "下方修正": "業績下方修正", "赤字": "赤字", "減益": "減益",
+    "減配": "減配", "無配": "無配", "引当金": "引当金計上",
+    "訴訟": "訴訟", "提訴": "訴訟", "不祥事": "不祥事",
+    "行政処分": "行政処分", "業務改善命令": "行政処分", "課徴金": "課徴金",
+    "談合": "談合疑い", "カルテル": "カルテル", "調査委": "調査委員会設置",
+    "第三者委員会": "第三者委員会", "格下げ": "格下げ", "目標株価引き下げ": "目標株価引下げ",
+    "リコール": "リコール", "粉飾": "粉飾", "破綻": "経営不安",
+}
+# 株価にプラスの好材料
+NEWS_POSITIVE = {
+    "上方修正": "業績上方修正", "増配": "増配", "自社株買い": "自社株買い",
+    "最高益": "最高益", "増益": "増益", "格上げ": "格上げ",
+    "目標株価引き上げ": "目標株価引上げ", "TOB": "TOB", "提携": "資本提携",
+}
+
+def is_noise_news(title):
+    return any(kw in title for kw in NEWS_EXCLUDE)
+
+def classify_news(title):
+    """ニュース見出しからリスク/好材料フラグを抽出"""
+    risks = [label for kw, label in NEWS_RISK.items() if kw in title]
+    goods = [label for kw, label in NEWS_POSITIVE.items() if kw in title]
+    return risks, goods
+
+# ── 銘柄ニュース取得（Google News日本語RSS／ノイズ除外） ──
 def get_ticker_news(company_name, max_items=3):
-    """Google NewsのRSSで日本語ニュースを取得"""
+    """Google NewsのRSSで日本語ニュースを取得。ノイズ記事は除外し、
+    リスク/好材料フラグも併せて返す。
+    戻り値: (items, risk_flags, good_flags)
+      items = [(label, link), ...]
+    """
     try:
         import urllib.parse
-        query = urllib.parse.quote(company_name.replace("★連続増配", "").replace("★連続増配", "").strip())
+        clean = company_name.replace("★連続増配", "").replace("★34年連続増配", "")
+        clean = clean.replace("★23年連続増配", "").replace("★連続増配", "").strip()
+        # ニュース精度向上のため「決算 OR 配当 OR 業績」等で軽く絞る
+        # 球団・スポーツチームを持つ企業は、決算系の語で検索を絞ってノイズを減らす
+        sports_heavy = any(s in clean for s in SPORTS_HEAVY)
+        if sports_heavy:
+            query = urllib.parse.quote(f"{clean} (決算 OR 配当 OR 業績 OR 株)")
+        else:
+            query = urllib.parse.quote(clean)
         url   = f"https://news.google.com/rss/search?q={query}&hl=ja&gl=JP&ceid=JP:ja"
         feed  = feedparser.parse(url)
-        items = []
-        for entry in feed.entries[:max_items]:
+        items, all_risks, all_goods = [], [], []
+        for entry in feed.entries:
             title = entry.get("title", "").strip()
             link  = entry.get("link", "")
             src   = entry.get("source", {}).get("title", "")
-            if title:
-                label = f"[{src}] {title}" if src else title
-                items.append((label, link))
-        return items
+            if not title or is_noise_news(title):
+                continue
+            risks, goods = classify_news(title)
+            # 球団保有企業は、業績・配当・M&A等のホワイトリスト該当記事のみ採用
+            if sports_heavy and not (risks or goods):
+                continue
+            all_risks += risks
+            all_goods += goods
+            label = f"[{src}] {title}" if src else title
+            items.append((label, link))
+            if len(items) >= max_items:
+                break
+        return items, sorted(set(all_risks)), sorted(set(all_goods))
     except Exception:
-        return []
+        return [], [], []
 
-# ── 買い/様子見/慎重 判定 ────────────────────────
-def trade_signal(position, div_yield, gain_pct=None):
-    """52W位置・配当・損益から総合判定を返す"""
+# ── 買い/様子見/慎重 判定（ニュース連動・指示書セクション5） ──
+def trade_signal(position, div_yield, gain_pct=None, risk_flags=None, good_flags=None):
+    """52W位置・配当・損益＋当日ニュースから総合判定を返す。
+    重大リスク（赤字・下方修正・不祥事・訴訟等）があれば機械的な
+    『買い』『継続保有』を出さず、必ず判断保留に上書きする。"""
+    risk_flags = risk_flags or []
+    good_flags = good_flags or []
+
+    # ── リスクによる上書き（最優先）──
+    if risk_flags:
+        tag = "・".join(risk_flags[:3])
+        # 配当の根幹を脅かすもの → 除外/保留
+        severe = {"業績下方修正", "赤字", "減配", "無配", "引当金計上",
+                  "不祥事", "行政処分", "談合疑い", "調査委員会設置",
+                  "第三者委員会", "粉飾", "経営不安"}
+        if any(r in severe for r in risk_flags):
+            return f"⛔ 判断保留（{tag}のニュースあり・結果確認まで様子見）"
+        return f"🔴 注意（{tag}のニュースあり）"
+
     # 含み損かつ配当低い → 要検討
     if gain_pct is not None and gain_pct < -15 and div_yield < 3.0:
-        return "🔴 要検討（含み損・低配当）"
+        base = "🔴 要検討（含み損・低配当）"
     # 割安圏 + 高配当
-    if position < 0.30 and div_yield >= 4.0:
-        return "🟢 強い買い検討（割安＋高配当）"
-    if position < 0.35 and div_yield >= 3.0:
-        return "🟢 買い検討（割安＋配当良好）"
-    if position < 0.40 and div_yield >= 3.0:
-        return "🟢 買い検討圏"
+    elif position < 0.30 and div_yield >= 4.0:
+        base = "🟢 強い買い検討（割安＋高配当）"
+    elif position < 0.35 and div_yield >= 3.0:
+        base = "🟢 買い検討（割安＋配当良好）"
+    elif position < 0.40 and div_yield >= 3.0:
+        base = "🟢 買い検討圏"
     # 高値圏
-    if position > 0.80:
-        return "🔴 追加購入は慎重（高値圏）"
-    if position > 0.65:
-        return "🟡 様子見（やや高値）"
+    elif position > 0.80:
+        base = "🔴 追加購入は慎重（高値圏）"
+    elif position > 0.65:
+        base = "🟡 様子見（やや高値）"
     # 適正圏
-    if div_yield >= 3.0:
-        return "🟡 継続保有（配当良好）"
-    return "🟡 様子見"
+    elif div_yield >= 3.0:
+        base = "🟡 継続保有（配当良好）"
+    else:
+        base = "🟡 様子見"
+
+    # 好材料の付記（評価は据え置き、コメントだけ補強）
+    if good_flags:
+        base += f"　＋{('・'.join(good_flags[:2]))}"
+    return base
 
 # ── 日経電子版スクレイピング ─────────────────────
 def get_nikkei_news(max_items=8):
@@ -437,6 +672,45 @@ def get_rss_news(urls, max_items=5):
             continue
     return items[:max_items]
 
+# ── マクロ環境のAI解説（朝/夜で役割を変える） ──────────
+def generate_macro_analysis(macro_text, macro_news, mode="morning", today_str=""):
+    try:
+        client = Groq(api_key=GROQ_API_KEY)
+        news_text = "\n".join(f"・{t}" for t, _ in macro_news) or "（ニュース取得なし）"
+        if mode == "morning":
+            role = ("今日これから動く相場の戦略視点で、前日の米国市場・ドル円・"
+                    "日経の直近推移を踏まえ『なぜ今この相場なのか』を解説。"
+                    "必ず直近3日でいくら動いたかとその理由に言及。"
+                    "『分散が大事』等の一般論で終わらせない。")
+        else:
+            role = ("今日の結果の振り返り視点で、今日の日経・ドル円がどう動いたか、"
+                    "その主因（金利・為替・決算・地政学・セクター物色）を特定して解説。"
+                    "どのセクターが買われ/売られたかにも触れる。")
+        prompt = f"""あなたは日本株の市況に詳しいアナリストです。本日は {today_str} です。{role}
+
+【マクロ数値（Yahoo Finance, 出典確実）】
+{macro_text}
+
+【関連ニュース見出し（Google News）】
+{news_text}
+
+厳守ルール：
+- 株価・指数・為替の具体的な数字は、上の【マクロ数値】に書かれた値のみを使う。
+  自分で別の数字（前日比○円安など）を創作しない。日経の前日比は提供値をそのまま使う。
+- 経済イベントは必ず「○月○日」と日付を添える。本日({today_str})より後の予定だけを
+  「今後の注目」として扱い、過去の発表（例：先週の雇用統計）は「発表済み」と明記する。
+  「明日」「来週」などの相対表現は使わず実日付に直す。
+
+事実とニュースに基づき憶測を避け、4〜6行で簡潔に。同じ言い回しの繰り返しを避けること。"""
+        r = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=700,
+        )
+        return r.choices[0].message.content
+    except Exception as e:
+        return f"マクロ解説生成失敗: {e}"
+
 # ── Groq APIでアドバイス生成 ─────────────────────
 def generate_advice(portfolio_summary, news_summary):
     try:
@@ -547,23 +821,44 @@ def div_label(dy):
     elif dy > 0:    return f"配当{dy:.1f}% ❌"
     return "配当データなし"
 
-def holding_line(ticker, name, shares, cost, d):
+def is_usd_ticker(ticker):
+    return not (".T" in ticker or ticker.startswith("^N") or ticker.startswith("^T"))
+
+def _wk_dh_str(d):
+    """週間騰落率・高値からの下落率の表示文字列"""
+    parts = []
+    if d.get("week_chg") is not None:
+        w = d["week_chg"]; parts.append(f"週{'+' if w>=0 else ''}{w:.1f}%")
+    if d.get("drop_high") is not None and d["drop_high"] < -0.05:
+        parts.append(f"高値比{d['drop_high']:.1f}%")
+    return "  ".join(parts)
+
+def holding_line(ticker, name, shares, cost, d, risk_flags=None, good_flags=None, usdjpy=1):
     if not d or "error" in d:
         return f"{name}  データ取得失敗"
-    price    = d["price"]
+    price = d["price"]
+    # 取得単価(cost)は円換算済みで登録されているため、米国ETFは現在値も円換算して揃える
+    if is_usd_ticker(ticker):
+        price_for_gain = price * (usdjpy or 1)
+        price_disp     = f"¥{price_for_gain:,.0f}(${price:,.2f})"
+    else:
+        price_for_gain = price
+        price_disp     = format_price(ticker, price)
     chg_str  = f"+{d['chg_pct']:.2f}%" if d["chg_pct"] >= 0 else f"{d['chg_pct']:.2f}%"
-    gain_pct = (price - cost) / cost * 100
+    gain_pct = (price_for_gain - cost) / cost * 100
     gain_str = f"+{gain_pct:.1f}%" if gain_pct >= 0 else f"{gain_pct:.1f}%"
     try:
         per_str = f"PER:{float(d['per']):.1f}" if d["per"] else ""
     except (ValueError, TypeError):
         per_str = ""
-    signal   = trade_signal(d["position"], d["div_yield"], gain_pct)
-    return (f"{name}  {format_price(ticker, price)}  前日比{chg_str}  "
-            f"取得比{gain_str}  52W:{int(d['position']*100)}%  "
+    asof   = f"({d.get('asof','')}時点)" if d.get("asof") else ""
+    wkdh   = _wk_dh_str(d)
+    signal = trade_signal(d["position"], d["div_yield"], gain_pct, risk_flags, good_flags)
+    return (f"{name}  {price_disp}{asof}  前日比{chg_str}  "
+            f"取得比{gain_str}  52W:{int(d['position']*100)}%  {wkdh}  "
             f"{div_label(d['div_yield'])}  {per_str}  → {signal}")
 
-def watch_line(ticker, name, d):
+def watch_line(ticker, name, d, risk_flags=None, good_flags=None):
     if not d or "error" in d:
         return f"{name}  データ取得失敗"
     chg_str = f"+{d['chg_pct']:.2f}%" if d["chg_pct"] >= 0 else f"{d['chg_pct']:.2f}%"
@@ -571,9 +866,11 @@ def watch_line(ticker, name, d):
         per_str = f"PER:{float(d['per']):.1f}" if d["per"] else ""
     except (ValueError, TypeError):
         per_str = ""
-    signal  = trade_signal(d["position"], d["div_yield"])
-    return (f"{name}  {format_price(ticker, d['price'])}  前日比{chg_str}  "
-            f"52W:{int(d['position']*100)}%  "
+    asof   = f"({d.get('asof','')}時点)" if d.get("asof") else ""
+    wkdh   = _wk_dh_str(d)
+    signal = trade_signal(d["position"], d["div_yield"], None, risk_flags, good_flags)
+    return (f"{name}  {format_price(ticker, d['price'])}{asof}  前日比{chg_str}  "
+            f"52W:{int(d['position']*100)}%  {wkdh}  "
             f"{div_label(d['div_yield'])}  {per_str}  → {signal}")
 
 # ── Notionブロックヘルパー ────────────────────────
@@ -653,115 +950,306 @@ def create_page(title, blocks, icon="📋"):
                            headers=headers, json={"children": blocks[i:i+100]})
     return resp.json().get("url", "")
 
-# ── 株式ページ ────────────────────────────────────
-def create_stock_page(date_str):
-    print("\n==== 株式レポート作成中 ====")
-    blocks = []
-    portfolio_lines = []
-    news_lines      = []
-    total_div       = 0
-    holdings_data   = []
+# ── 夜の「明日の注目＋ひとことメモ」AI生成 ─────────────
+def generate_evening_memo(macro_text, movers_text, today_str=""):
+    try:
+        client = Groq(api_key=GROQ_API_KEY)
+        prompt = f"""あなたは長期インカム（高配当・連続増配）投資家に寄り添うアドバイザーです。本日は {today_str} です。
 
-    # インデックス
-    blocks.append(h2("📈 主要インデックス"))
-    for ticker, name in INDICES:
-        d = get_stock_data(ticker)
-        if d and "error" not in d:
-            chg = d["chg_pct"]
-            line = f"{name}  {format_price(ticker, d['price'])}  {'+' if chg>=0 else ''}{chg:.2f}%  {d['signal']}"
-            blocks.append(bul(line))
-            portfolio_lines.append(f"[インデックス] {line}")
-            print(f"  {line}")
-    blocks.append(divider())
+【今日のマクロ】
+{macro_text}
 
-    # 保有株
-    blocks.append(h2("🇯🇵 保有株"))
-    blocks.append(callout("52W位置: 0%=年初来最安値 / 100%=最高値　🟢割安(〜30%) 🟡適正 🔴高値(65%〜)", "📌"))
+【今日大きく動いた保有/候補銘柄】
+{movers_text or "特になし"}
+
+以下を日本語で簡潔に：
+1. 🔭 明日以降の注目ポイント（米国市場・指標・決算など見るべき1〜2点）
+   ※必ず「○月○日」と日付を添え、本日({today_str})より後の予定のみ挙げる。
+     過去に発表済みのイベント（例：先週の雇用統計）は書かない。「明日」等の相対表現は実日付に直す。
+2. 💬 ひとことメモ（長期インカム投資家としての心構えを2〜3行。淡々と・分割で・狼狽売りしない等。毎回同じ言い回しは避ける）"""
+        r = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=600,
+        )
+        return r.choices[0].message.content
+    except Exception as e:
+        return f"夜メモ生成失敗: {e}"
+
+# ── ポートフォリオ一括収集（朝夜で共有） ───────────────
+def collect_portfolio(usdjpy):
+    """全銘柄の株価・ニュース・リスクフラグをまとめて取得。
+    戻り値 dict: holdings/watch/monitor の各リスト＋signals辞書＋total_div"""
+    data = {"holdings": [], "watch": [], "monitor": [],
+            "signals": {}, "total_div": 0.0, "news_lines": [], "portfolio_lines": []}
+
     for ticker, name, shares, cost in HOLDINGS:
-        d    = get_stock_data(ticker)
-        line = holding_line(ticker, name, shares, cost, d)
-        blocks.append(bul(line))
-        portfolio_lines.append(f"[保有] {line}")
-        print(f"  {line}")
-        if d and "error" not in d:
-            gain_pct = (d["price"] - cost) / cost * 100
-            holdings_data.append((name, d["div_yield"], shares, d["price"], gain_pct))
-            if d["div_yield"] > 0:
-                total_div += d["price"] * shares * d["div_yield"] / 100
-
-        # 銘柄ニュース
-        ticker_news = get_ticker_news(name)
-        if ticker_news:
-            for title, link in ticker_news:
-                blocks.append(bul(f"  📄 {title}", link or None))
-                news_lines.append(f"{name}: {title}")
+        d = get_stock_data(ticker)
+        news, risks, goods = get_ticker_news(name, max_items=3)
+        line = holding_line(ticker, name, shares, cost, d, risks, goods, usdjpy)
+        data["holdings"].append((ticker, name, shares, cost, d, news, risks, goods, line))
+        data["portfolio_lines"].append(f"[保有] {line}")
+        data["signals"][name] = trade_signal(
+            d["position"], d["div_yield"], (d["price"]-cost)/cost*100, risks, goods
+        ) if d and "error" not in d else "データなし"
+        for t, _ in news:
+            data["news_lines"].append(f"{name}: {t}")
+        # 配当キャッシュフロー（米国ETFはドル円で円換算）
+        if d and "error" not in d and d["div_yield"] > 0:
+            px = d["price"] * (usdjpy or 1) if is_usd_ticker(ticker) else d["price"]
+            data["total_div"] += px * shares * d["div_yield"] / 100
         time.sleep(0.3)
-    blocks.append(divider())
 
-    # 配当サマリー
-    blocks.append(h2("💰 配当キャッシュフロー（個別株・ETF）"))
-    blocks.append(callout(f"年間配当収入（概算）: ¥{total_div:,.0f}　※投資信託除く", "💴"))
-    over3  = [(n,dy,s,p,g) for n,dy,s,p,g in holdings_data if dy >= 3.0]
-    under3 = [(n,dy,s,p,g) for n,dy,s,p,g in holdings_data if 0 < dy < 3.0]
+    for ticker, name in WATCHLIST:
+        d = get_stock_data(ticker)
+        news, risks, goods = get_ticker_news(name, max_items=2)
+        line = watch_line(ticker, name, d, risks, goods)
+        data["watch"].append((ticker, name, d, news, risks, goods, line))
+        data["portfolio_lines"].append(f"[検討] {line}")
+        data["signals"][name] = trade_signal(d["position"], d["div_yield"], None, risks, goods) \
+            if d and "error" not in d else "データなし"
+        for t, _ in news:
+            data["news_lines"].append(f"{name}: {t}")
+        time.sleep(0.3)
+
+    for ticker, name in MONITOR:
+        d = get_stock_data(ticker)
+        news, risks, goods = get_ticker_news(name, max_items=1)
+        line = watch_line(ticker, name, d, risks, goods)
+        data["monitor"].append((ticker, name, d, news, risks, goods, line))
+        data["portfolio_lines"].append(f"[監視] {line}")
+        time.sleep(0.3)
+
+    return data
+
+def dividend_blocks(holdings, usdjpy, total_div):
+    """配当キャッシュフローのブロックを生成（ETF円換算済み）"""
+    blocks = [h2("💰 配当キャッシュフロー（個別株・ETF）"),
+              callout(f"年間配当収入（概算）: ¥{total_div:,.0f}　※投資信託除く／米ETFはドル円{usdjpy:.1f}で円換算", "💴")]
+    rows = []
+    for ticker, name, shares, cost, d, *_ in holdings:
+        if not d or "error" in d or d["div_yield"] <= 0:
+            continue
+        px = d["price"] * usdjpy if is_usd_ticker(ticker) else d["price"]
+        rows.append((name, d["div_yield"], px * shares * d["div_yield"] / 100,
+                     (d["price"]-cost)/cost*100))
+    over3  = [r for r in rows if r[1] >= 3.0]
+    under3 = [r for r in rows if 0 < r[1] < 3.0]
     if over3:
         blocks.append(para("✅ 目標達成（3%以上）"))
-        for n,dy,s,p,g in sorted(over3, key=lambda x:-x[1]):
-            mark = "🏆" if dy >= 4.0 else "✅"
-            blocks.append(bul(f"{mark} {n}  配当{dy:.1f}%  年間{p*s*dy/100:,.0f}円"))
+        for n, dy, yen, g in sorted(over3, key=lambda x:-x[1]):
+            blocks.append(bul(f"{'🏆' if dy>=4.0 else '✅'} {n}  配当{dy:.1f}%  年間{yen:,.0f}円"))
     if under3:
         blocks.append(para("❌ 目標未達（3%未満）"))
-        for n,dy,s,p,g in sorted(under3, key=lambda x:-x[1]):
-            loss_note = " ⚠️含み損" if g < 0 else ""
-            blocks.append(bul(f"❌ {n}  配当{dy:.1f}%  年間{p*s*dy/100:,.0f}円{loss_note}"))
+        for n, dy, yen, g in sorted(under3, key=lambda x:-x[1]):
+            blocks.append(bul(f"❌ {n}  配当{dy:.1f}%  年間{yen:,.0f}円{' ⚠️含み損' if g<0 else ''}"))
+    return blocks
+
+def deep_dive_questions(data):
+    """末尾の深掘り想定質問×3（リスクが出た銘柄を優先）"""
+    qs = []
+    for h in data["holdings"]:
+        name, risks = h[1], h[6]
+        if risks:
+            qs.append(f"{name}の{('・'.join(risks))}は減配につながる？継続保有でいい？")
+        if len(qs) >= 2:
+            break
+    qs.append("今のドル円水準で米国ETF(VOO/SPYD)を買い増すのは妥当？")
+    qs.append("NISA成長投資枠が余っていれば、どの高配当株を優先すべき？")
+    return qs[:3]
+
+# ── 朝レポート（07:00）────────────────────────────
+def create_morning_page(date_str, now_str, title, icon):
+    print("\n==== 🌅 朝レポート作成中 ====")
+    usdjpy = get_usdjpy_rate() or 1
+    snap   = get_macro_snapshot()
+    macro_news = get_macro_news("morning")
+    macro_txt  = macro_snapshot_text(snap)
+
+    blocks = [callout(f"生成: {now_str}（朝＝今日これからの戦略）", "🌅")]
+
+    # ① 今朝のマクロ環境
+    blocks.append(h2("① 今朝のマクロ環境"))
+    for name, price, chg, asof in snap["us"]:
+        blocks.append(bul(f"{name}: {price:,.2f}  ({'+' if chg>=0 else ''}{chg:.2f}%){f'  {asof}時点' if asof else ''}"))
+    if snap.get("usdjpy"):
+        cur, chg = snap["usdjpy"]
+        blocks.append(bul(f"ドル円: {cur:.2f}  ({'+' if chg>=0 else ''}{chg:.2f}%)"))
+    if snap.get("nikkei_3d"):
+        blocks.append(bul("日経 直近推移: " + " → ".join(f"{day} {v:,.0f}" for day, v in snap["nikkei_3d"])))
+    blocks.append(para("出典: Yahoo Finance（数値）／Google News（理由）"))
+
+    # ② 今日の相場観（AI、マクロ＋ニュース連動）
+    print("  マクロ解説生成中...")
+    macro_ai = generate_macro_analysis(macro_txt, macro_news, "morning", date_str)
+    blocks.append(h2("② 今日の相場観"))
+    blocks.extend(long_text_blocks(macro_ai, "🧭"))
+    for t, link in macro_news[:5]:
+        blocks.append(bul(f"📄 {t}", link or None))
     blocks.append(divider())
 
-    # 新規検討銘柄
-    blocks.append(h2("🎯 新規購入検討銘柄"))
-    blocks.append(callout("🟢割安圏 + 配当✅✅は積極検討候補", "⚠️"))
-    for ticker, name in WATCHLIST:
-        d    = get_stock_data(ticker)
-        line = watch_line(ticker, name, d)
+    # データ収集
+    print("  銘柄データ収集中...")
+    data = collect_portfolio(usdjpy)
+
+    # 前回からの変化（差分）
+    prev = load_prev_snapshot()
+    dl   = diff_lines(prev.get("signals", {}), data["signals"])
+    blocks.append(h2("📊 前回からの変化"))
+    if dl:
+        for d in dl[:8]:
+            blocks.append(bul(d))
+    else:
+        blocks.append(para("シグナルの大きな変化はなし（前回と同水準）"))
+    blocks.append(divider())
+
+    # ③ 買い場判定（保有＋候補）
+    blocks.append(h2("③ 買い場判定（保有＋候補）"))
+    blocks.append(callout("52W: 0%=安値〜100%=高値　🟢割安 🟡適正 🔴高値　⛔=重大ニュースで保留", "📌"))
+    blocks.append(h3("保有株"))
+    for ticker, name, shares, cost, d, news, risks, goods, line in data["holdings"]:
         blocks.append(bul(line))
-        portfolio_lines.append(f"[検討] {line}")
-        print(f"  [検討] {line}")
-        ticker_news = get_ticker_news(name, max_items=2)
-        for title, link in ticker_news:
-            blocks.append(bul(f"  📄 {title}", link or None))
-            news_lines.append(f"{name}: {title}")
-        time.sleep(0.3)
+        for t, link in news:
+            blocks.append(bul(f"  📄 {t}", link or None))
+    blocks.append(h3("新規購入検討"))
+    for ticker, name, d, news, risks, goods, line in data["watch"]:
+        blocks.append(bul(line))
+        for t, link in news:
+            blocks.append(bul(f"  📄 {t}", link or None))
+    blocks.append(divider())
+
+    # ④⑤⑥ 買い増し助言・新規注目・ポートフォリオ（AI）
+    print("  買い増し助言生成中...")
+    advice = generate_advice("\n".join(data["portfolio_lines"][:40]),
+                             "\n".join(data["news_lines"][:20]) or "ニュースなし")
+    blocks.append(h2("④ 今日の買い増し助言・新規注目"))
+    blocks.append(callout("予算目安: 1回10〜30万円・一度に使い切らず分割。NISA成長枠が残れば高配当はNISA優先", "💴"))
+    blocks.extend(long_text_blocks(advice, "💡"))
     blocks.append(divider())
 
     # 監視銘柄
     blocks.append(h2("👀 監視銘柄"))
-    for ticker, name in MONITOR:
-        d    = get_stock_data(ticker)
-        line = watch_line(ticker, name, d)
+    for ticker, name, d, news, risks, goods, line in data["monitor"]:
         blocks.append(bul(line))
-        portfolio_lines.append(f"[監視] {line}")
-        print(f"  [監視] {line}")
-        ticker_news = get_ticker_news(name, max_items=2)
-        for title, link in ticker_news:
-            blocks.append(bul(f"  📄 {title}", link or None))
-            news_lines.append(f"{name}: {title}")
-        time.sleep(0.3)
     blocks.append(divider())
 
-    # AIアドバイス（一番上に挿入するため後から先頭に追加）
-    print("\n  Claude AIアドバイス生成中...")
-    portfolio_summary = "\n".join(portfolio_lines[:40])
-    news_summary      = "\n".join(news_lines[:20]) if news_lines else "ニュース取得なし"
-    advice_text       = generate_advice(portfolio_summary, news_summary)
-    print(f"  アドバイス生成完了")
+    # 配当キャッシュフロー
+    blocks.extend(dividend_blocks(data["holdings"], usdjpy, data["total_div"]))
+    blocks.append(divider())
 
-    advice_blocks = [h2("🤖 今日のAIアドバイス")] + long_text_blocks(advice_text, "🤖") + [divider()]
-    blocks = advice_blocks + blocks
+    # 深掘り想定質問
+    blocks.append(h2("🔎 深掘り用の想定質問"))
+    for q in deep_dive_questions(data):
+        blocks.append(bul(q))
 
-    url = create_page(f"📈 {date_str} 株式レポート", blocks, "📈")
-    print(f"\n株式ページ完了: {url}")
+    # 差分用スナップショット保存
+    save_snapshot({"signals": data["signals"], "asof": now_str})
+
+    url = create_page(title, blocks, icon)
+    print(f"朝レポート完了: {url}")
+    return url
+
+# ── 夜レポート（19:00）────────────────────────────
+def create_evening_page(date_str, now_str, title, icon):
+    print("\n==== 🌙 夜レポート作成中 ====")
+    usdjpy = get_usdjpy_rate() or 1
+    snap   = get_macro_snapshot()
+    macro_news = get_macro_news("evening")
+    macro_txt  = macro_snapshot_text(snap)
+
+    blocks = [callout(f"生成: {now_str}（夜＝今日の結果の振り返り）", "🌙")]
+
+    # ① 今日の市場サマリー（実績）
+    blocks.append(h2("① 今日の市場サマリー（実績）"))
+    for tk, name in [("^N225","日経平均"), ("^GSPC","S&P500（参考）")]:
+        d = get_stock_data(tk)
+        if d and "error" not in d:
+            blocks.append(bul(f"{name}: {format_price(tk, d['price'])}  前日比{'+' if d['chg_pct']>=0 else ''}{d['chg_pct']:.2f}%  {_wk_dh_str(d)}"))
+    if snap.get("usdjpy"):
+        cur, chg = snap["usdjpy"]
+        blocks.append(bul(f"ドル円: {cur:.2f}  ({'+' if chg>=0 else ''}{chg:.2f}%)"))
+    blocks.append(divider())
+
+    # ② 今日動いた要因の分析（夜のメイン）
+    print("  要因分析生成中...")
+    macro_ai = generate_macro_analysis(macro_txt, macro_news, "evening", date_str)
+    blocks.append(h2("② 今日動いた要因の分析"))
+    blocks.extend(long_text_blocks(macro_ai, "🔍"))
+    for t, link in macro_news[:5]:
+        blocks.append(bul(f"📄 {t}", link or None))
+    blocks.append(divider())
+
+    # データ収集
+    print("  銘柄データ収集中...")
+    data = collect_portfolio(usdjpy)
+
+    # 前回からの変化
+    prev = load_prev_snapshot()
+    dl   = diff_lines(prev.get("signals", {}), data["signals"])
+    if dl:
+        blocks.append(h2("📊 前回からの変化"))
+        for d in dl[:8]:
+            blocks.append(bul(d))
+        blocks.append(divider())
+
+    # ③ 今日大きく動いた保有/候補銘柄だけ（±2%以上 or 重要ニュースあり）
+    blocks.append(h2("③ 今日大きく動いた銘柄"))
+    blocks.append(callout("掲載基準: 前日比±2%以上、または重要ニュースあり（その場合※ニュース注目）。値動きの大きい順", "📏"))
+    movers, movers_lines = [], []
+    for ticker, name, shares, cost, d, news, risks, goods, line in data["holdings"]:
+        if d and "error" not in d and (abs(d["chg_pct"]) >= 2.0 or risks or goods):
+            movers.append((abs(d["chg_pct"]), d["chg_pct"], name, news, risks, goods, line))
+    for ticker, name, d, news, risks, goods, line in data["watch"]:
+        if d and "error" not in d and (abs(d["chg_pct"]) >= 2.0 or risks or goods):
+            movers.append((abs(d["chg_pct"]), d["chg_pct"], name, news, risks, goods, line))
+    # 値動きの大きい順
+    movers.sort(key=lambda x: -x[0])
+    if movers:
+        for absc, chg, name, news, risks, goods, line in movers:
+            note = "　※ニュース注目（値動きは小さい）" if absc < 2.0 else ""
+            blocks.append(bul(line + note))
+            movers_lines.append(line)
+            for t, link in news:
+                blocks.append(bul(f"  📄 {t}", link or None))
+    else:
+        blocks.append(para("本日、±2%以上動いた保有/候補銘柄なし（小動き・重要ニュースもなし）"))
+    blocks.append(divider())
+
+    # ④ 保有銘柄に効く重要ニュース（リスク/好材料フラグ付きのみ）
+    blocks.append(h2("④ 保有・候補に効く重要ニュース"))
+    flagged = False
+    for ticker, name, shares, cost, d, news, risks, goods, line in data["holdings"]:
+        if risks or goods:
+            flagged = True
+            tag = "・".join(risks + goods)
+            blocks.append(bul(f"⚠️ {name}: {tag}"))
+            for t, link in news:
+                if classify_news(t)[0] or classify_news(t)[1]:
+                    blocks.append(bul(f"  📄 {t}", link or None))
+    if not flagged:
+        blocks.append(para("業績・配当・M&A・不祥事に関わる重要ニュースは検出なし"))
+    blocks.append(divider())
+
+    # ⑤⑥ 明日の注目＋ひとことメモ
+    print("  夜メモ生成中...")
+    memo = generate_evening_memo(macro_txt, "\n".join(movers_lines[:8]), date_str)
+    blocks.append(h2("⑤ 明日の注目ポイント・ひとことメモ"))
+    blocks.extend(long_text_blocks(memo, "🔭"))
+    blocks.append(divider())
+
+    # 深掘り想定質問
+    blocks.append(h2("🔎 深掘り用の想定質問"))
+    for q in deep_dive_questions(data):
+        blocks.append(bul(q))
+
+    save_snapshot({"signals": data["signals"], "asof": now_str})
+
+    url = create_page(title, blocks, icon)
+    print(f"夜レポート完了: {url}")
     return url
 
 # ── ニュースページ ────────────────────────────────
-def create_news_page(date_str):
+def create_news_page(date_str, time_str=""):
     print("\n==== ニュースダイジェスト作成中 ====")
     blocks       = []
     all_news_for_digest = []
@@ -832,20 +1320,56 @@ def create_news_page(date_str):
             blocks.append(para("ニュース取得できませんでした"))
     blocks.append(divider())
 
-    url = create_page(f"📰 {date_str} ニュースダイジェスト", blocks, "📰")
+    title = f"{date_str} {time_str} ニュースダイジェスト".replace("  ", " ").strip()
+    url = create_page(title, blocks, "📰")
     print(f"ニュースページ完了: {url}")
     return url
 
 # ── メイン ────────────────────────────────────────
+def resolve_mode(hour):
+    """引数 or 現在時刻からモードを決定（morning / evening / manual）"""
+    arg = sys.argv[1].lower() if len(sys.argv) > 1 else ""
+    if arg in ("morning", "朝", "am"):
+        return "morning"
+    if arg in ("evening", "夜", "pm", "night"):
+        return "evening"
+    if arg in ("manual", "手動"):
+        return "manual"
+    # 引数なし → 時刻で自動判定（15時より前=朝、以降=夜）
+    return "morning" if hour < 15 else "evening"
+
 def main():
     JST = timezone(timedelta(hours=9))
-    date_str = datetime.now(JST).strftime("%Y-%m-%d")
-    print(f"\n{date_str} 日報作成開始\n")
-    stock_url = create_stock_page(date_str)
-    news_url  = create_news_page(date_str)
-    print(f"\n=== 完了 ===")
-    print(f"株式 : {stock_url}")
-    print(f"ニュース : {news_url}")
+    now      = datetime.now(JST)
+    date_str = now.strftime("%Y-%m-%d")
+    time_str = now.strftime("%H:%M")
+    now_str  = now.strftime("%Y-%m-%d %H:%M")
+    mode     = resolve_mode(now.hour)
+    print(f"\n{now_str} 日報作成開始（モード: {mode}）\n")
+
+    # タイトルは「日付＋時刻」を必ず入れる。絵文字はページアイコンのみ（タイトル文字列には入れない）
+    if mode == "manual":
+        # 手動リロード。時間帯に応じた中身を出すが、タイトル/アイコンで手動と区別
+        icon  = "🔄"
+        title = f"{date_str} {time_str} 株レポート（手動）"
+        if now.hour < 15:
+            stock_url = create_morning_page(date_str, now_str, title, icon)
+        else:
+            stock_url = create_evening_page(date_str, now_str, title, icon)
+            news_url  = create_news_page(date_str, time_str)
+            print(f"\n=== 手動(夜)完了 ===\n株式 : {stock_url}\nニュース : {news_url}")
+            return
+        print(f"\n=== 手動(朝)完了 ===\n株式 : {stock_url}")
+    elif mode == "morning":
+        title = f"{date_str} {time_str} 朝の株レポート"
+        stock_url = create_morning_page(date_str, now_str, title, "🌅")
+        print(f"\n=== 朝の完了 ===\n株式 : {stock_url}")
+    else:
+        title = f"{date_str} {time_str} 夜の株レポート"
+        stock_url = create_evening_page(date_str, now_str, title, "🌙")
+        # 夜は振り返り回。ニュースダイジェストも夜に付ける
+        news_url = create_news_page(date_str, time_str)
+        print(f"\n=== 夜の完了 ===\n株式 : {stock_url}\nニュース : {news_url}")
 
 if __name__ == "__main__":
     main()
