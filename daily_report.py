@@ -37,7 +37,8 @@ INDICES = [
 ]
 
 # 保有個別株 (ticker, 銘柄名, 保有株数, 平均取得単価)
-HOLDINGS = [
+# ↓ watchlist.csv が存在すればそちらを正とし、無ければこの既定値を使う
+_DEFAULT_HOLDINGS = [
     ("8591.T", "オリックス",       5,   1442),
     ("9434.T", "ソフトバンク",    10,    130),
     ("8411.T", "みずほFG",         5,   1360),
@@ -57,7 +58,7 @@ HOLDINGS = [
 ]
 
 # 新規購入検討銘柄
-WATCHLIST = [
+_DEFAULT_WATCHLIST = [
     ("4246.T", "ダイキョーニシカワ"),
     ("8892.T", "エスコン"),
     ("8923.T", "トーセイ"),
@@ -69,7 +70,7 @@ WATCHLIST = [
 ]
 
 # 監視中銘柄
-MONITOR = [
+_DEFAULT_MONITOR = [
     ("1605.T", "INPEX"),
     ("3003.T", "ヒューリック"),
     ("3543.T", "コメダHD"),
@@ -83,6 +84,71 @@ MONITOR = [
     ("9433.T", "KDDI ★23年連続増配"),
     ("9436.T", "沖縄セルラー電話 ★連続増配"),
     ("7466.T", "SPK ★連続増配"),
+]
+
+# ── 監視リスト（watchlist.csv）読み込み（第4弾①）─────────
+WATCHLIST_FILE = Path(__file__).parent / "watchlist.csv"
+
+def load_watchlist():
+    """watchlist.csv を読み、(holdings, watchlist, monitor) を返す。
+    1行1銘柄。形式: コード,銘柄名,区分[,株数,取得単価]
+    ファイルが無い/壊れている場合は既定リストにフォールバックする。"""
+    if not WATCHLIST_FILE.exists():
+        return _DEFAULT_HOLDINGS, _DEFAULT_WATCHLIST, _DEFAULT_MONITOR
+    holdings, watch, monitor = [], [], []
+    try:
+        for raw in WATCHLIST_FILE.read_text(encoding="utf-8-sig").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            cols = [c.strip() for c in line.split(",")]
+            if len(cols) < 3:
+                continue
+            code, name, kind = cols[0], cols[1], cols[2]
+            if kind == "保有":
+                try:
+                    shares = int(float(cols[3])) if len(cols) > 3 and cols[3] else 0
+                    cost   = float(cols[4]) if len(cols) > 4 and cols[4] else 0
+                except ValueError:
+                    shares, cost = 0, 0
+                holdings.append((code, name, shares, cost))
+            elif kind == "候補":
+                watch.append((code, name))
+            else:  # 監視 など
+                monitor.append((code, name))
+        if not (holdings or watch or monitor):
+            return _DEFAULT_HOLDINGS, _DEFAULT_WATCHLIST, _DEFAULT_MONITOR
+        return holdings, watch, monitor
+    except Exception as e:
+        print(f"  ⚠️ watchlist.csv 読み込み失敗、既定リストを使用: {e}")
+        return _DEFAULT_HOLDINGS, _DEFAULT_WATCHLIST, _DEFAULT_MONITOR
+
+HOLDINGS, WATCHLIST, MONITOR = load_watchlist()
+
+# ── 発掘銘柄プール（監視外の高配当・連続増配・割安候補）第4弾② ──
+# (ticker, 銘柄名, セクター) — watchlist.csv に載っている銘柄は自動除外される
+DISCOVERY_POOL = [
+    ("1928.T", "積水ハウス ★連続増配", "建設・住宅"),
+    ("4732.T", "ユー・エス・エス ★連続増配", "サービス(中古車)"),
+    ("8424.T", "芙蓉総合リース ★連続増配", "金融(リース)"),
+    ("8566.T", "リコーリース ★連続増配", "金融(リース)"),
+    ("2502.T", "アサヒグループHD", "食品・飲料"),
+    ("2503.T", "キリンHD", "食品・飲料"),
+    ("4503.T", "アステラス製薬", "医薬品"),
+    ("4901.T", "富士フイルムHD", "化学・医療"),
+    ("5108.T", "ブリヂストン", "ゴム(タイヤ)"),
+    ("5401.T", "日本製鉄", "鉄鋼"),
+    ("5411.T", "JFEHD", "鉄鋼"),
+    ("7267.T", "ホンダ", "自動車"),
+    ("7270.T", "SUBARU", "自動車"),
+    ("9101.T", "日本郵船", "海運"),
+    ("9104.T", "商船三井", "海運"),
+    ("9513.T", "電源開発(Jパワー)", "電力"),
+    ("5020.T", "ENEOS HD", "石油・エネルギー"),
+    ("6178.T", "日本郵政", "サービス・金融"),
+    ("7956.T", "ピジョン", "日用品(育児)"),
+    ("4544.T", "H.U.グループ", "医薬・検査"),
+    ("1893.T", "五洋建設", "建設(海洋土木)"),
 ]
 
 # カテゴリニュースRSS
@@ -138,6 +204,8 @@ def get_stock_data(ticker):
         high52  = info.get("fiftyTwoWeekHigh", price)
         div_yield = info.get("dividendYield") or 0
         per     = info.get("trailingPE")
+        pbr     = info.get("priceToBook")
+        sector  = info.get("sector") or info.get("industry") or ""
 
         span     = high52 - low52
         position = (price - low52) / span if span > 0 else 0.5
@@ -153,7 +221,7 @@ def get_stock_data(ticker):
             "price": price, "chg_pct": chg_pct,
             "low52": low52, "high52": high52,
             "position": position, "div_yield": div_yield,
-            "per": per, "signal": signal,
+            "per": per, "pbr": pbr, "sector": sector, "signal": signal,
             "week_chg": week_chg, "drop_high": drop_high, "asof": asof,
         }
     except Exception as e:
@@ -283,6 +351,113 @@ def diff_lines(prev, cur):
         if old and old != sig:
             out.append(f"{name}: {old} → {sig}")
     return out
+
+# ── 💎 発掘銘柄（第4弾②③）────────────────────────
+DISC_FILE = Path(__file__).parent / "last_discovery.json"
+
+def load_recent_discovery():
+    """直近数日に提案した銘柄コード（顔ぶれ重複回避用）"""
+    try:
+        import json
+        data = json.loads(DISC_FILE.read_text(encoding="utf-8"))
+        return set(data.get("recent", []))
+    except Exception:
+        return set()
+
+def save_recent_discovery(tickers, keep=12):
+    try:
+        import json
+        prev = []
+        try:
+            prev = json.loads(DISC_FILE.read_text(encoding="utf-8")).get("recent", [])
+        except Exception:
+            pass
+        merged = list(tickers) + [t for t in prev if t not in tickers]
+        DISC_FILE.write_text(json.dumps({"recent": merged[:keep]}, ensure_ascii=False),
+                             encoding="utf-8")
+    except Exception:
+        pass
+
+def pick_discovery(date_str, n=3):
+    """監視外の高配当・連続増配・割安銘柄を日替わりで2〜3つ選ぶ。
+    戻り値: [(ticker, name, sector, d, reasons[]), ...]"""
+    import random
+    held = ({t for t, *_ in HOLDINGS} | {t for t, _ in WATCHLIST}
+            | {t for t, _ in MONITOR})
+    recent = load_recent_discovery()
+    pool = [c for c in DISCOVERY_POOL if c[0] not in held]
+    random.seed(date_str)          # 日付シードで毎日順番が変わる（日替わり）
+    random.shuffle(pool)
+    # 直近に出した銘柄は後回し
+    pool.sort(key=lambda c: c[0] in recent)
+
+    picks = []
+    for ticker, name, sector in pool:
+        if len(picks) >= n:
+            break
+        d = get_stock_data(ticker)
+        if not d or "error" in d:
+            continue
+        dy  = d.get("div_yield") or 0
+        per = d.get("per")
+        pbr = d.get("pbr")
+        reasons = []
+        if dy >= 3.5:
+            reasons.append(f"高配当{dy:.1f}%")
+        if "連続増配" in name:
+            reasons.append("連続増配")
+        if per and per < 12:
+            reasons.append(f"低PER{per:.1f}")
+        if pbr and pbr <= 1.2:
+            reasons.append(f"低PBR{pbr:.2f}")
+        if not reasons:
+            continue
+        # 配当を脅かす重大ニュースがある銘柄は出さない
+        _, risks, _ = get_ticker_news(name, max_items=2)
+        if risks:
+            continue
+        picks.append((ticker, name, sector, d, reasons))
+
+    save_recent_discovery([p[0] for p in picks])
+    return picks
+
+def generate_discovery_comment(picks):
+    """発掘銘柄に『なぜ注目か＋会社概要一言』をAIで付ける（出典は数値ベース）"""
+    if not picks:
+        return {}
+    try:
+        client = Groq(api_key=GROQ_API_KEY)
+        lines = []
+        for ticker, name, sector, d, reasons in picks:
+            lines.append(f"{ticker} {name}／{sector}／"
+                         f"配当{(d.get('div_yield') or 0):.1f}% "
+                         f"PER{d.get('per') or '―'} PBR{d.get('pbr') or '―'}／"
+                         f"注目点:{'・'.join(reasons)}")
+        data_text = "\n".join(lines)
+        prompt = f"""次の各銘柄について、長期インカム投資家向けに
+「①その会社が何をしているか（一言）」「②なぜ今注目できるか（1〜2行、提示した数値に基づく）」
+を簡潔に書いてください。誇張や憶測は避け、提示数値の範囲で。
+
+各銘柄を必ず次の形式で：
+{{コード}} | {{何の会社か一言}} | {{注目理由1〜2行}}
+
+【対象】
+{data_text}"""
+        r = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=700,
+        )
+        out = {}
+        for ln in r.choices[0].message.content.splitlines():
+            if "|" in ln:
+                parts = [p.strip() for p in ln.split("|")]
+                code = parts[0].split()[0] if parts[0] else ""
+                if code:
+                    out[code] = parts[1:]
+        return out
+    except Exception:
+        return {}
 
 # ── ニュース選別ルール（指示書セクション4／第2弾②） ───────
 # 株価に影響しないノイズ（スポーツ・イベント・CSR等）は除外
@@ -1125,6 +1300,32 @@ def create_morning_page(date_str, now_str, title, icon):
     blocks.append(h2("④ 今日の買い増し助言・新規注目"))
     blocks.append(callout("予算目安: 1回10〜30万円・一度に使い切らず分割。NISA成長枠が残れば高配当はNISA優先", "💴"))
     blocks.extend(long_text_blocks(advice, "💡"))
+    blocks.append(divider())
+
+    # 💎 今日の発掘銘柄（監視外からAIが提案／朝のみ）
+    print("  発掘銘柄選定中...")
+    picks = pick_discovery(date_str, n=3)
+    blocks.append(h2("💎 今日の発掘銘柄"))
+    blocks.append(callout("保有・監視リスト外から、高配当/連続増配/割安の候補を日替わりで提案。気に入ったら1行追記で正式採用", "💎"))
+    if picks:
+        comments = generate_discovery_comment(picks)
+        for ticker, name, sector, d, reasons in picks:
+            dy  = d.get("div_yield") or 0
+            per = f"PER{d['per']:.1f}" if d.get("per") else "PER―"
+            pbr = f"PBR{d['pbr']:.2f}" if d.get("pbr") else "PBR―"
+            blocks.append(h3(f"{name}（{ticker}）"))
+            blocks.append(bul(f"{format_price(ticker, d['price'])}  配当{dy:.1f}%  {per}  {pbr}  ｜ {sector}"))
+            blocks.append(bul(f"注目点: {'・'.join(reasons)}"))
+            c = comments.get(ticker)
+            if c:
+                if len(c) >= 1 and c[0]:
+                    blocks.append(bul(f"📖 {c[0]}"))
+                if len(c) >= 2 and c[1]:
+                    blocks.append(bul(f"🔎 {c[1]}"))
+            # 採用方法（コピペ用の1行）
+            blocks.append(bul(f"📌 採用するには：watchlist.csv に「{ticker},{name},監視」を追記 → 次回から自動で追跡"))
+    else:
+        blocks.append(para("本日は条件を満たす発掘銘柄なし（無理に提案しません）"))
     blocks.append(divider())
 
     # 監視銘柄

@@ -2,6 +2,7 @@
 log.txt
 trigger.html
 last_snapshot.json
+last_discovery.json
 run_morning.bat
 run_evening.bat
 __pycache__/
