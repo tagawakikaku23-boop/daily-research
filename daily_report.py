@@ -1106,6 +1106,78 @@ def para(text):
 def divider():
     return {"object":"block","type":"divider","divider":{}}
 
+# ── 見やすい版フォーマット用ヘルパー（表・段組み・トグル・色） ──
+def rt(text, bold=False, color=None, link=None):
+    """リッチテキスト1要素を作る。color は 'green' / 'red_background' 等"""
+    o = {"type": "text", "text": {"content": str(text)[:2000]}}
+    ann = {}
+    if bold:  ann["bold"] = True
+    if color: ann["color"] = color
+    if ann:   o["annotations"] = ann
+    if link:  o["text"]["link"] = {"url": link}
+    return o
+
+def callout_rt(rich, emoji="💡", color=None):
+    """リッチテキスト配列＋色付きのコールアウト"""
+    body = {"rich_text": rich, "icon": {"type": "emoji", "emoji": emoji}}
+    if color: body["color"] = color
+    return {"object": "block", "type": "callout", "callout": body}
+
+def card(title, lines, emoji="📊", color="gray_background"):
+    """段組みの中に入れる小さなカード（太字タイトル＋数値行）"""
+    rich = [rt(title, bold=True)]
+    for ln in lines:
+        rich.append(rt("\n" + ln))
+    return callout_rt(rich, emoji, color)
+
+def columns(col_blocklists):
+    """col_blocklists: 各カラムのブロック配列のリスト（2個以上）"""
+    cols = []
+    for blocks in col_blocklists:
+        cols.append({"object": "block", "type": "column",
+                     "column": {"children": blocks}})
+    return {"object": "block", "type": "column_list",
+            "column_list": {"children": cols}}
+
+def cell(text, color=None, bold=False):
+    """テーブルセル（リッチテキスト配列）"""
+    return [rt(text, bold=bold, color=color)]
+
+def table(headers, rows, has_row_header=False):
+    """headers: 文字列リスト, rows: 各行=セル配列（cell()で作る）のリスト"""
+    width = len(headers)
+    children = [{"object": "block", "type": "table_row",
+                 "table_row": {"cells": [cell(h, bold=True) for h in headers]}}]
+    for r in rows:
+        # 足りない列は空セルで埋める
+        cells = list(r) + [cell("")] * (width - len(r))
+        children.append({"object": "block", "type": "table_row",
+                         "table_row": {"cells": cells[:width]}})
+    return {"object": "block", "type": "table",
+            "table": {"table_width": width, "has_column_header": True,
+                      "has_row_header": has_row_header, "children": children}}
+
+def toggle(summary, children, color=None):
+    """折りたたみ（出典リンクなどを隠す）"""
+    body = {"rich_text": [rt(summary)], "children": children}
+    if color: body["color"] = color
+    return {"object": "block", "type": "toggle", "toggle": body}
+
+def chg_color(pct, strong=2.0):
+    """前日比%に応じた文字色（ヒートマップ用）。大きい動きは背景色で強調"""
+    if pct >= strong:   return "green_background"
+    if pct > 0:         return "green"
+    if pct <= -strong:  return "red_background"
+    if pct < 0:         return "red"
+    return None
+
+def signal_color(signal):
+    """判定文字列→色"""
+    if "⛔" in signal or "🔴" in signal: return "red"
+    if "🟢" in signal:                   return "green"
+    if "🟡" in signal:                   return "yellow"
+    return None
+
 # アイコン→「種類」セレクト値の対応（DB分類用）
 _ICON_KIND = {"🌅": "🌅 朝", "🌙": "🌙 夜", "🔄": "🔄 手動", "📰": "📰 ニュース"}
 
@@ -1254,6 +1326,155 @@ def deep_dive_questions(data):
     qs.append("NISA成長投資枠が余っていれば、どの高配当株を優先すべき？")
     return qs[:3]
 
+# ── 見やすい版：集計とセクション組み立て ─────────────
+def portfolio_metrics(data, usdjpy):
+    """評価額・含み損益・年間配当・平均利回りを算出"""
+    val = pl = div = 0.0
+    for ticker, name, shares, cost, d, *_ in data["holdings"]:
+        if not d or "error" in d:
+            continue
+        px = d["price"] * usdjpy if is_usd_ticker(ticker) else d["price"]
+        val += px * shares
+        pl  += (px - cost) * shares
+        if (d.get("div_yield") or 0) > 0:
+            div += px * shares * d["div_yield"] / 100
+    yld = div / val * 100 if val else 0
+    return val, pl, div, yld
+
+def _signed(pct, digits=1):
+    return f"{'+' if pct >= 0 else ''}{pct:.{digits}f}%"
+
+def build_summary_cards(data, usdjpy):
+    """ポートフォリオ・サマリーの4カード（段組み）"""
+    val, pl, div, yld = portfolio_metrics(data, usdjpy)
+    pl_pct = pl / (val - pl) * 100 if (val - pl) else 0
+    pl_color = "green_background" if pl >= 0 else "red_background"
+    return columns([
+        [card("💰 評価額", [f"¥{val:,.0f}"], "💰", "gray_background")],
+        [card("📈 含み損益", [f"{'+' if pl>=0 else ''}¥{pl:,.0f}", _signed(pl_pct)], "📈", pl_color)],
+        [card("💴 年間配当(概算)", [f"¥{div:,.0f}"], "💴", "blue_background")],
+        [card("📊 平均利回り", [f"{yld:.1f}%"], "📊", "yellow_background")],
+    ])
+
+def collect_buys_and_cautions(data):
+    """買い場候補・要注意（⛔）銘柄を仕分け"""
+    buys, cautions = [], []
+    rows = [(t, n, d, risks) for t, n, s, c, d, nw, risks, g, l in data["holdings"]]
+    rows += [(t, n, d, risks) for t, n, d, nw, risks, g, l in data["watch"]]
+    for ticker, name, d, risks in rows:
+        if not d or "error" in d:
+            continue
+        sig = data["signals"].get(name, "")
+        if "⛔" in sig:
+            cautions.append((name, risks))
+        elif "🟢" in sig or "買い" in sig:
+            buys.append((ticker, name, d))
+    return buys, cautions
+
+def build_tldr(mode, data, snap):
+    """今日の3行まとめ（データから決定的に作成＝古い情報を載せない）"""
+    buys, cautions = collect_buys_and_cautions(data)
+    lines = []
+    # 1) 相場の方向（当日のスナップショットのみ）
+    nk = snap.get("nikkei")
+    if nk:
+        ud = "上昇" if nk["chg_yen"] >= 0 else "下落"
+        lines.append(rt(f"1. 日経 {nk['close']:,.0f}円（前日比{_signed(nk['chg_pct'],2)}）の{ud}。"))
+    # 2) 買い場
+    if buys:
+        names = "・".join(n for _, n, _ in buys[:3])
+        lines.append(rt(f"\n2. 今日の買い場候補：{names}", bold=True, color="green"))
+    else:
+        lines.append(rt("\n2. 今日の買い場候補：なし（無理に買わない）"))
+    # 3) 注意
+    if cautions:
+        names = "・".join(n for n, _ in cautions[:3])
+        lines.append(rt(f"\n3. ⛔ 要注意：{names}（重要ニュースあり・判断保留）", color="red"))
+    else:
+        lines.append(rt("\n3. 重大な悪材料ニュースは検出なし"))
+    head = [rt("今日の3行まとめ（TL;DR）\n", bold=True)]
+    return callout_rt(head + lines, "📌", "purple_background")
+
+def build_buy_alert(data):
+    """買い場アラート（緑）＋要注意（赤）"""
+    buys, cautions = collect_buys_and_cautions(data)
+    blocks = []
+    if buys:
+        rich = [rt("◎ 買い場・買い検討（割安＋配当）\n", bold=True)]
+        for ticker, name, d in buys[:5]:
+            per = f"PER{d['per']:.1f}" if d.get("per") else "PER―"
+            rich.append(rt(f"・{name}  {format_price(ticker, d['price'])}  配当{(d.get('div_yield') or 0):.1f}%  {per}\n"))
+        blocks.append(callout_rt(rich, "🟢", "green_background"))
+    if cautions:
+        rich = [rt("⛔ 今日は見送り・要注意\n", bold=True)]
+        for name, risks in cautions[:5]:
+            tag = "・".join(risks) if risks else "重要ニュースあり"
+            rich.append(rt(f"・{name}（{tag}）\n"))
+        blocks.append(callout_rt(rich, "⛔", "red_background"))
+    return blocks
+
+def build_heatmap_table(data, usdjpy):
+    """保有株ヒートマップ（前日比を色で）"""
+    rows = []
+    for ticker, name, shares, cost, d, news, risks, goods, line in data["holdings"]:
+        if not d or "error" in d:
+            continue
+        px = d["price"] * usdjpy if is_usd_ticker(ticker) else d["price"]
+        chg = d["chg_pct"]; wk = d.get("week_chg") or 0
+        rows.append([
+            cell(name),
+            cell(f"¥{px:,.0f}"),
+            cell(_signed(chg, 2), chg_color(chg), bold=abs(chg) >= 2),
+            cell(_signed(wk), "green" if wk >= 0 else "red"),
+            cell(f"{(d.get('div_yield') or 0):.1f}%"),
+        ])
+    return table(["銘柄", "現在値", "前日比", "週間", "配当"], rows)
+
+def build_judgment_table(data, usdjpy, title_label="保有株"):
+    """銘柄一覧（判定を色付きで）"""
+    rows = []
+    for ticker, name, shares, cost, d, news, risks, goods, line in data["holdings"]:
+        if not d or "error" in d:
+            rows.append([cell(name), cell("取得失敗"), cell(""), cell(""), cell("")])
+            continue
+        px = d["price"] * usdjpy if is_usd_ticker(ticker) else d["price"]
+        sig = data["signals"].get(name, "")
+        rows.append([
+            cell(name),
+            cell(f"¥{px:,.0f}"),
+            cell(f"{(d.get('div_yield') or 0):.1f}%"),
+            cell(f"{int(d['position']*100)}%"),
+            cell(sig, signal_color(sig)),
+        ])
+    return table(["銘柄", "現在値", "配当", "52W", "判定"], rows)
+
+def build_watch_table(data):
+    """検討銘柄の判定テーブル"""
+    rows = []
+    for ticker, name, d, news, risks, goods, line in data["watch"]:
+        if not d or "error" in d:
+            continue
+        sig = data["signals"].get(name, "")
+        per = f"{d['per']:.1f}" if d.get("per") else "―"
+        rows.append([
+            cell(name),
+            cell(format_price(ticker, d["price"])),
+            cell(f"{(d.get('div_yield') or 0):.1f}%"),
+            cell(per),
+            cell(sig, signal_color(sig)),
+        ])
+    return table(["銘柄", "現在値", "配当", "PER", "判定"], rows)
+
+def news_toggle(label, items):
+    """ニュースの引用リンクをトグルに折りたたむ"""
+    children = [bul(t, link or None) for t, link in items]
+    return toggle(f"📎 {label}（クリックで開く）", children)
+
+def freshness_note():
+    return callout_rt(
+        [rt("※ データは本日取得分。古い記事は載せず、過去の事例は「過去の参照」と明示時のみ引用。")],
+        "🕒", "gray_background")
+
 # ── 朝レポート（07:00）────────────────────────────
 def create_morning_page(date_str, now_str, title, icon):
     print("\n==== 🌅 朝レポート作成中 ====")
@@ -1262,65 +1483,95 @@ def create_morning_page(date_str, now_str, title, icon):
     macro_news = get_macro_news("morning")
     macro_txt  = macro_snapshot_text(snap)
 
-    blocks = [callout(f"生成: {now_str}（朝＝今日これからの戦略）", "🌅")]
+    # データ収集（TL;DR等で使うので先に）
+    print("  銘柄データ収集中...")
+    data = collect_portfolio(usdjpy)
 
-    # ① 今朝のマクロ環境
+    blocks = [callout_rt([rt(f"生成: {now_str}", bold=True), rt("　｜　朝＝今日これからの戦略")],
+                         "🌅", "yellow_background")]
+
+    # 今日の3行まとめ（TL;DR）
+    blocks.append(build_tldr("morning", data, snap))
+
+    # ポートフォリオ・サマリー（4カード）
+    blocks.append(h2("💼 ポートフォリオ・サマリー"))
+    blocks.append(build_summary_cards(data, usdjpy))
+
+    # 買い場アラート / 要注意
+    blocks.append(h2("🔥 今日の買い場アラート"))
+    alert = build_buy_alert(data)
+    blocks.extend(alert if alert else [para("本日は明確な買い場・要注意銘柄なし")])
+
+    # ① 今朝のマクロ環境（主要3指標をカード＋他はトグル）
     blocks.append(h2("① 今朝のマクロ環境"))
-    for name, price, chg, asof in snap["us"]:
-        blocks.append(bul(f"{name}: {price:,.2f}  ({'+' if chg>=0 else ''}{chg:.2f}%){f'  {asof}時点' if asof else ''}"))
+    us_map = {name: (price, chg) for name, price, chg, _ in snap["us"]}
+    macro_cards = []
+    if snap.get("nikkei"):
+        nk = snap["nikkei"]
+        macro_cards.append([card("📉 日経平均", [f"{nk['close']:,.0f}円", _signed(nk['chg_pct'],2)],
+                                 "📉", "red_background" if nk['chg_yen']<0 else "green_background")])
     if snap.get("usdjpy"):
         cur, chg = snap["usdjpy"]
-        blocks.append(bul(f"ドル円: {cur:.2f}  ({'+' if chg>=0 else ''}{chg:.2f}%)"))
+        macro_cards.append([card("💴 ドル円", [f"{cur:.2f}", _signed(chg,2)], "💴", "gray_background")])
+    if "SOX(半導体)" in us_map:
+        p, c = us_map["SOX(半導体)"]
+        macro_cards.append([card("🔥 SOX 半導体", [f"{p:,.0f}", _signed(c,2)], "🔥",
+                                 "green_background" if c>=0 else "red_background")])
+    if len(macro_cards) >= 2:
+        blocks.append(columns(macro_cards))
+    other_us = [bul(f"{n}: {p:,.2f}  ({_signed(c,2)})") for n, (p, c) in us_map.items() if "SOX" not in n]
     if snap.get("nikkei_3d"):
-        blocks.append(bul("日経 直近推移: " + " → ".join(f"{day} {v:,.0f}" for day, v in snap["nikkei_3d"])))
-    blocks.append(para("出典: Yahoo Finance（数値）／Google News（理由）"))
+        other_us.append(bul("日経 直近推移: " + " → ".join(f"{day} {v:,.0f}" for day, v in snap["nikkei_3d"])))
+    if other_us:
+        blocks.append(toggle("📊 その他の米国指数・日経の推移", other_us))
 
-    # ② 今日の相場観（AI、マクロ＋ニュース連動）
+    # ② 今日の相場観（AI）＋出典はトグル
     print("  マクロ解説生成中...")
     macro_ai = generate_macro_analysis(macro_txt, macro_news, "morning", date_str)
     blocks.append(h2("② 今日の相場観"))
-    blocks.extend(long_text_blocks(macro_ai, "🧭"))
-    for t, link in macro_news[:5]:
-        blocks.append(bul(f"📄 {t}", link or None))
+    blocks.append(callout_rt([rt(macro_ai[:1900])], "🧭", "blue_background"))
+    if macro_news:
+        blocks.append(news_toggle("相場の理由ニュース", macro_news[:5]))
     blocks.append(divider())
-
-    # データ収集
-    print("  銘柄データ収集中...")
-    data = collect_portfolio(usdjpy)
 
     # 前回からの変化（差分）
     prev = load_prev_snapshot()
     dl   = diff_lines(prev.get("signals", {}), data["signals"])
-    blocks.append(h2("📊 前回からの変化"))
     if dl:
-        for d in dl[:8]:
-            blocks.append(bul(d))
-    else:
-        blocks.append(para("シグナルの大きな変化はなし（前回と同水準）"))
-    blocks.append(divider())
+        blocks.append(callout_rt([rt("前回からの変化\n", bold=True)] + [rt(f"・{x}\n") for x in dl[:8]],
+                                 "📊", "gray_background"))
 
-    # ③ 買い場判定（保有＋候補）
-    blocks.append(h2("③ 買い場判定（保有＋候補）"))
-    blocks.append(callout("52W: 0%=安値〜100%=高値　🟢割安 🟡適正 🔴高値　⛔=重大ニュースで保留", "📌"))
-    blocks.append(h3("保有株"))
+    # ③ 保有株ヒートマップ＋判定テーブル
+    blocks.append(h2("③ 保有株ヒートマップ"))
+    blocks.append(callout_rt([rt("色が濃いほど値動き大　｜　🟩緑=上昇　🟥赤=下落")], "💡", "gray_background"))
+    blocks.append(build_heatmap_table(data, usdjpy))
+
+    blocks.append(h2("④ 買い場判定（保有株）"))
+    blocks.append(callout_rt([rt("52W: 0%=安値〜100%=高値　🟢割安 🟡適正 🔴高値 ⛔重大ニュースで保留")], "📌", "gray_background"))
+    blocks.append(build_judgment_table(data, usdjpy))
+
+    blocks.append(h2("⑤ 新規購入検討"))
+    blocks.append(build_watch_table(data))
+
+    # 各銘柄ニュースはトグルに集約（ゴチャつき防止）
+    news_children = []
     for ticker, name, shares, cost, d, news, risks, goods, line in data["holdings"]:
-        blocks.append(bul(line))
         for t, link in news:
-            blocks.append(bul(f"  📄 {t}", link or None))
-    blocks.append(h3("新規購入検討"))
+            news_children.append(bul(f"{name}: {t}", link or None))
     for ticker, name, d, news, risks, goods, line in data["watch"]:
-        blocks.append(bul(line))
         for t, link in news:
-            blocks.append(bul(f"  📄 {t}", link or None))
+            news_children.append(bul(f"{name}: {t}", link or None))
+    if news_children:
+        blocks.append(toggle("📎 保有・候補の関連ニュース（クリックで開く）", news_children[:90]))
     blocks.append(divider())
 
-    # ④⑤⑥ 買い増し助言・新規注目・ポートフォリオ（AI）
+    # ⑥ 買い増し助言（AI）
     print("  買い増し助言生成中...")
     advice = generate_advice("\n".join(data["portfolio_lines"][:40]),
                              "\n".join(data["news_lines"][:20]) or "ニュースなし")
-    blocks.append(h2("④ 今日の買い増し助言・新規注目"))
-    blocks.append(callout("予算目安: 1回10〜30万円・一度に使い切らず分割。NISA成長枠が残れば高配当はNISA優先", "💴"))
-    blocks.extend(long_text_blocks(advice, "💡"))
+    blocks.append(h2("⑥ 今日の買い増し助言・新規注目"))
+    blocks.append(callout_rt([rt("予算目安: 1回10〜30万円・分割で。NISA成長枠が残れば高配当はNISA優先")], "💴", "blue_background"))
+    blocks.append(callout_rt([rt(advice[:1900])], "💡", "yellow_background"))
     blocks.append(divider())
 
     # 💎 今日の発掘銘柄（監視外からAIが提案／朝のみ）
@@ -1363,6 +1614,7 @@ def create_morning_page(date_str, now_str, title, icon):
     blocks.append(h2("🔎 深掘り用の想定質問"))
     for q in deep_dive_questions(data):
         blocks.append(bul(q))
+    blocks.append(freshness_note())
 
     # 差分用スナップショット保存
     save_snapshot({"signals": data["signals"], "asof": now_str})
@@ -1379,75 +1631,93 @@ def create_evening_page(date_str, now_str, title, icon):
     macro_news = get_macro_news("evening")
     macro_txt  = macro_snapshot_text(snap)
 
-    blocks = [callout(f"生成: {now_str}（夜＝今日の結果の振り返り）", "🌙")]
+    # データ収集（TL;DR等で先に使う）
+    print("  銘柄データ収集中...")
+    data = collect_portfolio(usdjpy)
 
-    # ① 今日の市場サマリー（実績）
+    blocks = [callout_rt([rt(f"生成: {now_str}", bold=True), rt("　｜　夜＝今日の結果の振り返り")],
+                         "🌙", "blue_background")]
+
+    # 今日の3行まとめ（TL;DR）
+    blocks.append(build_tldr("evening", data, snap))
+
+    # ① 今日の市場サマリー（カード）
     blocks.append(h2("① 今日の市場サマリー（実績）"))
-    for tk, name in [("^N225","日経平均"), ("^GSPC","S&P500（参考）")]:
-        d = get_stock_data(tk)
-        if d and "error" not in d:
-            blocks.append(bul(f"{name}: {format_price(tk, d['price'])}  前日比{'+' if d['chg_pct']>=0 else ''}{d['chg_pct']:.2f}%  {_wk_dh_str(d)}"))
+    sum_cards = []
+    if snap.get("nikkei"):
+        nk = snap["nikkei"]
+        sum_cards.append([card("📊 日経平均", [f"{nk['close']:,.0f}円", _signed(nk['chg_pct'],2)],
+                              "📊", "red_background" if nk['chg_yen']<0 else "green_background")])
     if snap.get("usdjpy"):
         cur, chg = snap["usdjpy"]
-        blocks.append(bul(f"ドル円: {cur:.2f}  ({'+' if chg>=0 else ''}{chg:.2f}%)"))
-    blocks.append(divider())
+        sum_cards.append([card("💴 ドル円", [f"{cur:.2f}", _signed(chg,2)], "💴", "gray_background")])
+    us_map = {name: (price, chg) for name, price, chg, _ in snap["us"]}
+    if "SOX(半導体)" in us_map:
+        p, c = us_map["SOX(半導体)"]
+        sum_cards.append([card("🔥 SOX 半導体", [f"{p:,.0f}", _signed(c,2)], "🔥",
+                              "green_background" if c>=0 else "red_background")])
+    if len(sum_cards) >= 2:
+        blocks.append(columns(sum_cards))
 
-    # ② 今日動いた要因の分析（夜のメイン）
+    # ポートフォリオ・サマリー
+    blocks.append(h2("💼 ポートフォリオ・サマリー"))
+    blocks.append(build_summary_cards(data, usdjpy))
+
+    # ② 今日動いた要因（AI）＋出典トグル
     print("  要因分析生成中...")
     macro_ai = generate_macro_analysis(macro_txt, macro_news, "evening", date_str)
     blocks.append(h2("② 今日動いた要因の分析"))
-    blocks.extend(long_text_blocks(macro_ai, "🔍"))
-    for t, link in macro_news[:5]:
-        blocks.append(bul(f"📄 {t}", link or None))
+    blocks.append(callout_rt([rt(macro_ai[:1900])], "🔍", "yellow_background"))
+    if macro_news:
+        blocks.append(news_toggle("値動きの理由ニュース", macro_news[:5]))
     blocks.append(divider())
-
-    # データ収集
-    print("  銘柄データ収集中...")
-    data = collect_portfolio(usdjpy)
 
     # 前回からの変化
     prev = load_prev_snapshot()
     dl   = diff_lines(prev.get("signals", {}), data["signals"])
     if dl:
-        blocks.append(h2("📊 前回からの変化"))
-        for d in dl[:8]:
-            blocks.append(bul(d))
-        blocks.append(divider())
+        blocks.append(callout_rt([rt("前回からの変化\n", bold=True)] + [rt(f"・{x}\n") for x in dl[:8]],
+                                 "📊", "gray_background"))
 
-    # ③ 今日大きく動いた保有/候補銘柄だけ（±2%以上 or 重要ニュースあり）
+    # ③ 今日大きく動いた銘柄（±2%以上 or 重要ニュース）→ 表
     blocks.append(h2("③ 今日大きく動いた銘柄"))
-    blocks.append(callout("掲載基準: 前日比±2%以上、または重要ニュースあり（その場合※ニュース注目）。値動きの大きい順", "📏"))
-    movers, movers_lines = [], []
+    blocks.append(callout_rt([rt("掲載基準: 前日比±2%以上、または重要ニュースあり。値動きの大きい順")], "📏", "gray_background"))
+    movers, movers_lines, mrows = [], [], []
     for ticker, name, shares, cost, d, news, risks, goods, line in data["holdings"]:
         if d and "error" not in d and (abs(d["chg_pct"]) >= 2.0 or risks or goods):
-            movers.append((abs(d["chg_pct"]), d["chg_pct"], name, news, risks, goods, line))
+            movers.append((abs(d["chg_pct"]), d, name, ticker, risks, goods))
     for ticker, name, d, news, risks, goods, line in data["watch"]:
         if d and "error" not in d and (abs(d["chg_pct"]) >= 2.0 or risks or goods):
-            movers.append((abs(d["chg_pct"]), d["chg_pct"], name, news, risks, goods, line))
-    # 値動きの大きい順
+            movers.append((abs(d["chg_pct"]), d, name, ticker, risks, goods))
     movers.sort(key=lambda x: -x[0])
     if movers:
-        for absc, chg, name, news, risks, goods, line in movers:
-            note = "　※ニュース注目（値動きは小さい）" if absc < 2.0 else ""
-            blocks.append(bul(line + note))
-            movers_lines.append(line)
-            for t, link in news:
-                blocks.append(bul(f"  📄 {t}", link or None))
+        for absc, d, name, ticker, risks, goods in movers:
+            chg = d["chg_pct"]
+            tag = "・".join(risks + goods) if (risks or goods) else ("※ニュース注目" if absc < 2.0 else "")
+            mrows.append([
+                cell(name),
+                cell(format_price(ticker, d["price"])),
+                cell(_signed(chg, 2), chg_color(chg), bold=absc >= 2),
+                cell(tag, "red" if risks else None),
+            ])
+            movers_lines.append(f"{name} {_signed(chg,2)} {tag}")
+        blocks.append(table(["銘柄", "株価", "前日比", "メモ"], mrows))
     else:
         blocks.append(para("本日、±2%以上動いた保有/候補銘柄なし（小動き・重要ニュースもなし）"))
     blocks.append(divider())
 
-    # ④ 保有銘柄に効く重要ニュース（リスク/好材料フラグ付きのみ）
+    # ④ 重要ニュース（リスク/好材料のみ）→ コールアウト＋トグル
     blocks.append(h2("④ 保有・候補に効く重要ニュース"))
     flagged = False
     for ticker, name, shares, cost, d, news, risks, goods, line in data["holdings"]:
         if risks or goods:
             flagged = True
-            tag = "・".join(risks + goods)
-            blocks.append(bul(f"⚠️ {name}: {tag}"))
-            for t, link in news:
-                if classify_news(t)[0] or classify_news(t)[1]:
-                    blocks.append(bul(f"  📄 {t}", link or None))
+            color = "red_background" if risks else "green_background"
+            blocks.append(callout_rt([rt(f"{name}: ", bold=True), rt("・".join(risks + goods))],
+                                     "⚠️" if risks else "✨", color))
+            rel = [(t, link) for t, link in news if classify_news(t)[0] or classify_news(t)[1]]
+            if rel:
+                blocks.append(news_toggle(f"{name} 関連ニュース", rel))
     if not flagged:
         blocks.append(para("業績・配当・M&A・不祥事に関わる重要ニュースは検出なし"))
     blocks.append(divider())
@@ -1456,13 +1726,14 @@ def create_evening_page(date_str, now_str, title, icon):
     print("  夜メモ生成中...")
     memo = generate_evening_memo(macro_txt, "\n".join(movers_lines[:8]), date_str)
     blocks.append(h2("⑤ 明日の注目ポイント・ひとことメモ"))
-    blocks.extend(long_text_blocks(memo, "🔭"))
+    blocks.append(callout_rt([rt(memo[:1900])], "🔭", "blue_background"))
     blocks.append(divider())
 
     # 深掘り想定質問
     blocks.append(h2("🔎 深掘り用の想定質問"))
     for q in deep_dive_questions(data):
         blocks.append(bul(q))
+    blocks.append(freshness_note())
 
     save_snapshot({"signals": data["signals"], "asof": now_str})
 
