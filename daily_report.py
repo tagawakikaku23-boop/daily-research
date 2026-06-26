@@ -29,6 +29,8 @@ PARENT_PAGE_ID = os.environ["NOTION_PAGE_ID"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 # レポート格納先データベース（第3-4弾④：氾濫対策）。未設定なら従来どおりページ直下に作成
 NOTION_DB_ID = os.environ.get("NOTION_DB_ID", "37afc83b-0e47-81d4-901d-d20a958122e0")
+# 監視銘柄DB（Notionでワンタッチ追加）。未設定/失敗時は watchlist.csv にフォールバック
+NOTION_WATCHLIST_DB_ID = os.environ.get("NOTION_WATCHLIST_DB_ID", "3555cab9-4828-4185-86eb-5a0614b8c0ea")
 
 # インデックス
 INDICES = [
@@ -91,10 +93,64 @@ _DEFAULT_MONITOR = [
 # ── 監視リスト（watchlist.csv）読み込み（第4弾①）─────────
 WATCHLIST_FILE = Path(__file__).parent / "watchlist.csv"
 
+def _wl_text(prop):
+    """Notionプロパティ（title/rich_text）からプレーン文字列を取り出す"""
+    if not prop:
+        return ""
+    arr = prop.get("title") or prop.get("rich_text") or []
+    return "".join(x.get("plain_text", "") for x in arr).strip()
+
+def load_watchlist_from_notion():
+    """Notionの監視銘柄DBを読む。失敗時は None を返す（CSVへフォールバック）"""
+    if not NOTION_WATCHLIST_DB_ID:
+        return None
+    try:
+        headers = {"Authorization": f"Bearer {NOTION_API_KEY}",
+                   "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
+        holdings, watch, monitor = [], [], []
+        cursor, guard = None, 0
+        while guard < 20:
+            guard += 1
+            body = {"page_size": 100}
+            if cursor:
+                body["start_cursor"] = cursor
+            r = requests.post(
+                f"https://api.notion.com/v1/databases/{NOTION_WATCHLIST_DB_ID}/query",
+                headers=headers, json=body, timeout=30)
+            r.raise_for_status()
+            j = r.json()
+            for row in j.get("results", []):
+                p = row.get("properties", {})
+                code = _wl_text(p.get("コード"))
+                name = _wl_text(p.get("銘柄名"))
+                kind = (p.get("区分", {}).get("select") or {}).get("name", "")
+                if not code or not name:
+                    continue
+                if kind == "保有":
+                    shares = p.get("株数", {}).get("number") or 0
+                    cost   = p.get("取得単価", {}).get("number") or 0
+                    holdings.append((code, name, int(shares), float(cost)))
+                elif kind == "候補":
+                    watch.append((code, name))
+                else:
+                    monitor.append((code, name))
+            if not j.get("has_more"):
+                break
+            cursor = j.get("next_cursor")
+        if holdings or watch or monitor:
+            print(f"  ✅ 監視銘柄をNotion DBから読込: 保有{len(holdings)}/候補{len(watch)}/監視{len(monitor)}")
+            return holdings, watch, monitor
+        return None
+    except Exception as e:
+        print(f"  ⚠️ Notion監視DB読込失敗、CSV/既定にフォールバック: {e}")
+        return None
+
 def load_watchlist():
-    """watchlist.csv を読み、(holdings, watchlist, monitor) を返す。
-    1行1銘柄。形式: コード,銘柄名,区分[,株数,取得単価]
-    ファイルが無い/壊れている場合は既定リストにフォールバックする。"""
+    """監視銘柄を Notion DB → watchlist.csv → 既定リスト の順で読み込む。
+    (holdings, watchlist, monitor) を返す。"""
+    via_notion = load_watchlist_from_notion()
+    if via_notion:
+        return via_notion
     if not WATCHLIST_FILE.exists():
         return _DEFAULT_HOLDINGS, _DEFAULT_WATCHLIST, _DEFAULT_MONITOR
     holdings, watch, monitor = [], [], []
