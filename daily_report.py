@@ -237,39 +237,80 @@ MACRO_TICKERS = [
     ("^SOX",  "SOX(半導体)"),
 ]
 
+# ── 指数の最新値取得（日足が遅延するため分足を日別集約して鮮度を確保） ──
+def index_quote(ticker):
+    """分足5mを「日別の最終値」に集約して最新値・前日比・取得時刻を返す。
+    ^N225 等は日足フィードが1〜2営業日遅れることがあるため分足を優先する。
+    戻り値: dict(price, chg_pct, asof_dt, days=[(date,close)...]) / 取れなければ None"""
+    t = yf.Ticker(ticker)
+    days = []
+    # ① 分足（鮮度優先）
+    try:
+        intr = t.history(period="5d", interval="5m")["Close"].dropna()
+        by_day = {}
+        for ts, v in intr.items():
+            by_day[ts.date()] = (float(v), ts)
+        for d in sorted(by_day):
+            days.append((d, by_day[d][0], by_day[d][1]))
+    except Exception:
+        pass
+    # ② 分足が不足なら日足でフォールバック
+    if len(days) < 2:
+        try:
+            dl = t.history(period="1mo")["Close"].dropna()
+            days = [(dl.index[i].date(), float(dl.iloc[i]), dl.index[i]) for i in range(len(dl))]
+        except Exception:
+            return None
+    if len(days) < 1:
+        return None
+    price, asof_dt = days[-1][1], days[-1][2]
+    prev = days[-2][1] if len(days) >= 2 else price
+    return {
+        "price": price,
+        "chg_pct": (price - prev) / prev * 100 if prev else 0,
+        "asof_dt": asof_dt,
+        "days": [(d.strftime("%m/%d"), c) for d, c, _ in days],
+    }
+
 def get_macro_snapshot():
-    """米国市場・SOX・ドル円・日経3日推移を機械取得（出典=Yahoo Finance）"""
-    snap = {"us": [], "usdjpy": None, "nikkei_3d": [], "asof": ""}
+    """米国市場・SOX・ドル円・日経推移を機械取得（出典=Yahoo Finance）。
+    指数は分足ベースで最新値を取り、古い値を載せないようにする。"""
+    snap = {"us": [], "usdjpy": None, "nikkei_3d": [], "asof": "", "stale": []}
     JST = timezone(timedelta(hours=9))
-    snap["asof"] = datetime.now(JST).strftime("%Y-%m-%d %H:%M")
-    # 米国主要指数＋SOX
+    now = datetime.now(JST)
+    snap["asof"] = now.strftime("%Y-%m-%d %H:%M")
+    # 米国主要指数＋SOX（分足ベース）
     for tk, name in MACRO_TICKERS:
-        d = get_stock_data(tk)
-        if d and "error" not in d:
-            snap["us"].append((name, d["price"], d["chg_pct"], d.get("asof", "")))
+        q = index_quote(tk)
+        if q:
+            asof = q["asof_dt"].astimezone(JST).strftime("%m/%d %H:%M")
+            snap["us"].append((name, q["price"], q["chg_pct"], asof))
     # ドル円
     try:
-        fx = yf.Ticker("JPY=X").history(period="5d")["Close"]
+        fx = yf.Ticker("JPY=X").history(period="5d", interval="5m")["Close"].dropna()
+        if len(fx) < 2:
+            fx = yf.Ticker("JPY=X").history(period="5d")["Close"].dropna()
         if len(fx) >= 1:
-            cur = fx.iloc[-1]
-            prv = fx.iloc[-2] if len(fx) >= 2 else cur
+            cur = float(fx.iloc[-1])
+            prv = float(fx.iloc[-2]) if len(fx) >= 2 else cur
             snap["usdjpy"] = (cur, (cur - prv) / prv * 100)
     except Exception:
         pass
-    # 日経 直近3営業日の終値推移＋前日比（円・%を整合させて1か所で算出）
-    try:
-        nk = yf.Ticker("^N225").history(period="10d")["Close"]
-        for i in range(max(0, len(nk) - 3), len(nk)):
-            snap["nikkei_3d"].append((nk.index[i].strftime("%m/%d"), nk.iloc[i]))
-        if len(nk) >= 2:
-            cur, prv = nk.iloc[-1], nk.iloc[-2]
-            snap["nikkei"] = {
-                "close": cur, "chg_yen": cur - prv,
-                "chg_pct": (cur - prv) / prv * 100,
-                "asof": nk.index[-1].strftime("%m/%d"),
-            }
-    except Exception:
-        pass
+    # 日経（分足ベースで最新＋前日比、推移）
+    nk = index_quote("^N225")
+    if nk:
+        snap["nikkei_3d"] = nk["days"][-3:]
+        # 鮮度チェック：最新足が2日以上前なら警告フラグ
+        age_days = (now.date() - nk["asof_dt"].astimezone(JST).date()).days
+        prev = nk["days"][-2][1] if len(nk["days"]) >= 2 else nk["price"]
+        snap["nikkei"] = {
+            "close": nk["price"], "chg_yen": nk["price"] - prev,
+            "chg_pct": nk["chg_pct"],
+            "asof": nk["asof_dt"].astimezone(JST).strftime("%m/%d %H:%M"),
+            "stale": age_days >= 2,
+        }
+        if age_days >= 2:
+            snap["stale"].append(f"日経データが{age_days}日前（{snap['nikkei']['asof']}）")
     return snap
 
 def get_usdjpy_rate():
@@ -1504,11 +1545,14 @@ def create_morning_page(date_str, now_str, title, icon):
 
     # ① 今朝のマクロ環境（主要3指標をカード＋他はトグル）
     blocks.append(h2("① 今朝のマクロ環境"))
+    if snap.get("stale"):
+        blocks.append(callout_rt([rt("データ鮮度の注意：" + "／".join(snap["stale"]), bold=True)],
+                                 "⚠️", "orange_background"))
     us_map = {name: (price, chg) for name, price, chg, _ in snap["us"]}
     macro_cards = []
     if snap.get("nikkei"):
         nk = snap["nikkei"]
-        macro_cards.append([card("📉 日経平均", [f"{nk['close']:,.0f}円", _signed(nk['chg_pct'],2)],
+        macro_cards.append([card("📉 日経平均", [f"{nk['close']:,.0f}円", _signed(nk['chg_pct'],2), f"({nk['asof']})"],
                                  "📉", "red_background" if nk['chg_yen']<0 else "green_background")])
     if snap.get("usdjpy"):
         cur, chg = snap["usdjpy"]
@@ -1643,10 +1687,13 @@ def create_evening_page(date_str, now_str, title, icon):
 
     # ① 今日の市場サマリー（カード）
     blocks.append(h2("① 今日の市場サマリー（実績）"))
+    if snap.get("stale"):
+        blocks.append(callout_rt([rt("データ鮮度の注意：" + "／".join(snap["stale"]), bold=True)],
+                                 "⚠️", "orange_background"))
     sum_cards = []
     if snap.get("nikkei"):
         nk = snap["nikkei"]
-        sum_cards.append([card("📊 日経平均", [f"{nk['close']:,.0f}円", _signed(nk['chg_pct'],2)],
+        sum_cards.append([card("📊 日経平均", [f"{nk['close']:,.0f}円", _signed(nk['chg_pct'],2), f"({nk['asof']})"],
                               "📊", "red_background" if nk['chg_yen']<0 else "green_background")])
     if snap.get("usdjpy"):
         cur, chg = snap["usdjpy"]
