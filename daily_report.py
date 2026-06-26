@@ -285,6 +285,38 @@ def get_stock_data(ticker):
     except Exception as e:
         return {"error": str(e)}
 
+# ── 東証の休場判定（土日・祝日）─────────────────────
+# 東証の休業日（祝日＋振替＋年末年始）。2026-2027分。年1回追記でメンテ。
+TSE_HOLIDAYS = {
+    # 2026
+    "2026-01-01", "2026-01-02", "2026-01-03", "2026-01-12", "2026-02-11",
+    "2026-02-23", "2026-03-20", "2026-04-29", "2026-05-03", "2026-05-04",
+    "2026-05-05", "2026-05-06", "2026-07-20", "2026-08-11", "2026-09-21",
+    "2026-09-22", "2026-09-23", "2026-10-12", "2026-11-03", "2026-11-23",
+    "2026-12-31",
+    # 2027
+    "2027-01-01", "2027-01-02", "2027-01-03", "2027-01-11", "2027-02-11",
+    "2027-02-23", "2027-03-22", "2027-04-29", "2027-05-03", "2027-05-04",
+    "2027-05-05", "2027-07-19", "2027-08-11", "2027-09-20", "2027-09-23",
+    "2027-10-11", "2027-11-03", "2027-11-23", "2027-12-31",
+}
+
+def is_tse_trading_day(dt):
+    """東証が開く日か（土日・祝日でないか）"""
+    if dt.weekday() >= 5:          # 5=土, 6=日
+        return False
+    return dt.strftime("%Y-%m-%d") not in TSE_HOLIDAYS
+
+def market_status(now):
+    """休場判定とラベルを返す。
+    戻り値: dict(open=bool, reason=str, next_label=str)"""
+    if is_tse_trading_day(now):
+        return {"open": True, "reason": "", "next_label": ""}
+    wd = "土曜" if now.weekday() == 5 else ("日曜" if now.weekday() == 6 else "祝日")
+    return {"open": False,
+            "reason": f"本日は{wd}で東証は休場",
+            "next_label": "週明け（次の取引日）"}
+
 # ── マクロ環境スナップショット（yfinanceで機械取得） ──
 MACRO_TICKERS = [
     ("^DJI",  "NYダウ"),
@@ -380,7 +412,12 @@ def get_usdjpy_rate():
 # ── マクロ「理由」ニュース（Google News RSS・出典付き） ──
 def get_macro_news(mode="morning", max_items=8):
     """相場が動いた理由を探すためのニュース見出しを出典付きで収集"""
-    if mode == "morning":
+    if mode == "weekend":
+        queries = [
+            "週明け 日経平均 見通し", "来週 株式市場 注目", "米国株 金曜 終値",
+            "来週 経済指標 日米 スケジュール",
+        ]
+    elif mode == "morning":
         queries = [
             "日経平均 今日 見通し", "米国株 ダウ ナスダック 終値",
             "ドル円 為替 今日", "今週 経済指標 スケジュール 日米",
@@ -985,6 +1022,36 @@ def generate_macro_analysis(macro_text, macro_news, mode="morning", today_str=""
     except Exception as e:
         return f"マクロ解説生成失敗: {e}"
 
+# ── 週末・休場日の「週明け気配」AI生成 ─────────────────
+def generate_weekend_outlook(us_text, news_text, today_str):
+    try:
+        client = Groq(api_key=GROQ_API_KEY)
+        prompt = f"""あなたは日本株の市況に詳しいアナリストです。本日は {today_str}（東証は休場）。
+東証は動いていないので、直近の金曜の米国市場の流れと週末のニュースから、
+「週明け（次の取引日）の日本株の気配」を述べてください。
+
+【金曜の米国市場（週明けの手がかり・Yahoo Finance）】
+{us_text}
+
+【週末の関連ニュース見出し（Google News）】
+{news_text}
+
+厳守ルール：
+- これは「断定」ではなく「気配・見通し」。「上がる/下がる」と言い切らず「〜の流れなら上がりやすい/下がりやすい」と条件付きで。
+- 株価・指数の数字は上の【金曜の米国市場】の値のみ使う。自分で数字を創作しない。
+- 経済イベントは「○月○日」と日付を添え、本日({today_str})より後の予定だけ。過去のものは書かない。
+- 半導体が強ければ半導体関連、円安なら輸出関連…のように、どのセクター/銘柄傾向に効きそうかを一言。
+
+4〜6行で簡潔に。最後に「※あくまで気配。寄り付きで確認を」と添える。"""
+        r = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=700,
+        )
+        return r.choices[0].message.content
+    except Exception as e:
+        return f"週明け気配の生成失敗: {e}"
+
 # ── Groq APIでアドバイス生成 ─────────────────────
 def generate_advice(portfolio_summary, news_summary):
     try:
@@ -1468,13 +1535,15 @@ def collect_buys_and_cautions(data):
             buys.append((ticker, name, d))
     return buys, cautions
 
-def build_tldr(mode, data, snap):
+def build_tldr(mode, data, snap, is_open=True):
     """今日の3行まとめ（データから決定的に作成＝古い情報を載せない）"""
     buys, cautions = collect_buys_and_cautions(data)
     lines = []
     # 1) 相場の方向（当日のスナップショットのみ）
     nk = snap.get("nikkei")
-    if nk:
+    if nk and not is_open:
+        lines.append(rt(f"1. 🏖️ 本日は休場。最終取引日の日経終値 {nk['close']:,.0f}円。週明けは米国市場の流れに注目。"))
+    elif nk:
         ud = "上昇" if nk["chg_yen"] >= 0 else "下落"
         lines.append(rt(f"1. 日経 {nk['close']:,.0f}円（前日比{_signed(nk['chg_pct'],2)}）の{ud}。"))
     # 2) 買い場
@@ -1572,6 +1641,38 @@ def freshness_note():
         [rt("※ データは本日取得分。古い記事は載せず、過去の事例は「過去の参照」と明示時のみ引用。")],
         "🕒", "gray_background")
 
+def build_weekend_section(status, snap, date_str):
+    """休場日（土日祝）用：休場バナー＋金曜の米国市場＋週明けの気配"""
+    blocks = [callout_rt(
+        [rt(status["reason"] + "。", bold=True),
+         rt(" 表の株価・前日比は最終取引日（直近の金曜など）の終値です。")],
+        "🏖️", "orange_background")]
+    us_map = {n: (p, c) for n, p, c, _ in snap.get("us", [])}
+    cards = []
+    for key, emoji in [("S&P500", "📈"), ("NASDAQ", "💻"), ("SOX(半導体)", "🔥")]:
+        if key in us_map:
+            p, c = us_map[key]
+            cards.append([card(f"{emoji} {key}", [f"{p:,.0f}", _signed(c, 2)], emoji,
+                               "green_background" if c >= 0 else "red_background")])
+    if snap.get("usdjpy"):
+        cur, c = snap["usdjpy"]
+        cards.append([card("💴 ドル円", [f"{cur:.2f}", _signed(c, 2)], "💴", "gray_background")])
+    blocks.append(h3("🌎 金曜の米国市場（週明けの手がかり）"))
+    if len(cards) >= 2:
+        blocks.append(columns(cards))
+    # 週明けの気配（AI）
+    print("  週明け気配生成中...")
+    news = get_macro_news("weekend")
+    ai = generate_weekend_outlook(
+        macro_snapshot_text(snap),
+        "\n".join(f"・{t}" for t, _ in news) or "（ニュース取得なし）", date_str)
+    blocks.append(h3("🔮 週明けの気配"))
+    blocks.append(callout_rt([rt(ai[:1900])], "🔮", "purple_background"))
+    if news:
+        blocks.append(news_toggle("週明け関連ニュース", news[:5]))
+    blocks.append(divider())
+    return blocks
+
 # ── 朝レポート（07:00）────────────────────────────
 def create_morning_page(date_str, now_str, title, icon):
     print("\n==== 🌅 朝レポート作成中 ====")
@@ -1584,11 +1685,16 @@ def create_morning_page(date_str, now_str, title, icon):
     print("  銘柄データ収集中...")
     data = collect_portfolio(usdjpy)
 
+    status = market_status(datetime.now(timezone(timedelta(hours=9))))
     blocks = [callout_rt([rt(f"生成: {now_str}", bold=True), rt("　｜　朝＝今日これからの戦略")],
                          "🌅", "yellow_background")]
 
     # 今日の3行まとめ（TL;DR）
-    blocks.append(build_tldr("morning", data, snap))
+    blocks.append(build_tldr("morning", data, snap, status["open"]))
+
+    # 休場日（土日祝）は「週明けの気配」を差し込む
+    if not status["open"]:
+        blocks.extend(build_weekend_section(status, snap, date_str))
 
     # ポートフォリオ・サマリー（4カード）
     blocks.append(h2("💼 ポートフォリオ・サマリー"))
@@ -1735,11 +1841,16 @@ def create_evening_page(date_str, now_str, title, icon):
     print("  銘柄データ収集中...")
     data = collect_portfolio(usdjpy)
 
+    status = market_status(datetime.now(timezone(timedelta(hours=9))))
     blocks = [callout_rt([rt(f"生成: {now_str}", bold=True), rt("　｜　夜＝今日の結果の振り返り")],
                          "🌙", "blue_background")]
 
     # 今日の3行まとめ（TL;DR）
-    blocks.append(build_tldr("evening", data, snap))
+    blocks.append(build_tldr("evening", data, snap, status["open"]))
+
+    # 休場日（土日祝）は「週明けの気配」を差し込む
+    if not status["open"]:
+        blocks.extend(build_weekend_section(status, snap, date_str))
 
     # ① 今日の市場サマリー（カード）
     blocks.append(h2("① 今日の市場サマリー（実績）"))
