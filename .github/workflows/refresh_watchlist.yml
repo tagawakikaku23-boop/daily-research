@@ -1,0 +1,34 @@
+name: 監視銘柄 指標更新
+
+on:
+  # 平日の日本時間 9:00〜15:30 に30分ごと（UTC 0:00〜6:30）
+  schedule:
+    - cron: '0,30 0-6 * * 1-5'
+  workflow_dispatch:
+
+# 同時実行を防ぐ（重複更新の回避）
+concurrency:
+  group: refresh-watchlist
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: リポジトリを取得
+        uses: actions/checkout@v4
+
+      - name: Python セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: パッケージインストール
+        run: pip install yfinance feedparser requests groq
+
+      - name: 監視銘柄を更新
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          NOTION_PAGE_ID: ${{ secrets.NOTION_PAGE_ID }}
+        run: python refresh_watchlist.py
