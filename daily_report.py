@@ -965,22 +965,31 @@ def get_niigata_nippo_news(max_items=8):
         return []
 
 # ── カテゴリニュース取得（RSS） ───────────────────
-def get_rss_news(urls, max_items=5):
+def get_rss_news(urls, max_items=5, retries=3, wait=3):
+    """RSS取得。一時的な失敗（サイト混雑・通信瞬断）に備えて数回リトライする。"""
     items = []
     for url in urls:
-        try:
-            feed = feedparser.parse(url)
-            for entry in feed.entries:
-                title = entry.get("title", "").strip()
-                link  = entry.get("link", "")
-                if title and len(title) > 5:
-                    items.append((title, link))
-                if len(items) >= max_items:
-                    break
-            if items:
-                break
-        except Exception:
-            continue
+        for attempt in range(retries):
+            try:
+                feed = feedparser.parse(url)
+                entries = feed.entries or []
+                if not entries:
+                    raise ValueError("entries empty")  # 一時不調とみなして再試行
+                for entry in entries:
+                    title = entry.get("title", "").strip()
+                    link  = entry.get("link", "")
+                    if title and len(title) > 5:
+                        items.append((title, link))
+                    if len(items) >= max_items:
+                        break
+                break  # このURLは成功
+            except Exception:
+                if attempt < retries - 1:
+                    print(f"    RSS再試行({attempt+1}/{retries}): {url[:50]}")
+                    time.sleep(wait)
+                    continue
+        if items:
+            break
     return items[:max_items]
 
 # ── マクロ環境のAI解説（朝/夜で役割を変える） ──────────
