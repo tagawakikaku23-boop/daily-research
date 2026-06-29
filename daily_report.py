@@ -1984,48 +1984,55 @@ def create_news_page(date_str, time_str=""):
         for title, _ in items:
             all_news_for_digest.append(f"{category}: {title}")
 
-    # AIダイジェストを冒頭に
+    # ヘッダー
+    total_cnt = len(all_news_for_digest)
+    blocks.append(callout_rt(
+        [rt(f"生成: {date_str} {time_str}", bold=True),
+         rt(f"　｜　今日のニュース（全{total_cnt}件を収集・AIが要約）")],
+        "📰", "blue_background"))
+
+    # 🗞️ AIダイジェスト（最重要 → 冒頭に大きく）
     if all_news_for_digest:
         print("  AIダイジェスト生成中...")
         digest = generate_news_digest("\n".join(all_news_for_digest))
-        blocks.append(h2("🗞️ 今日のニュース ダイジェスト（AI要約）"))
-        blocks.extend(long_text_blocks(digest, "🗞️"))
+        blocks.append(h2("🗞️ 今日のダイジェスト（AI要約）"))
+        blocks.append(callout_rt([rt(digest[:1900])], "🗞️", "purple_background"))
         blocks.append(divider())
 
-    # 日経新聞ピックアップ（ログイン成功時のみ表示）
+    # 📰 日経新聞ピックアップ（AI所感＋ヘッドラインはトグル）
     if nikkei_items:
         print("  日経AIコメント生成中...")
         nikkei_analysis = generate_nikkei_analysis(nikkei_items)
         blocks.append(h2("📰 日経新聞ピックアップ"))
-        blocks.extend(long_text_blocks(nikkei_analysis, "📰"))
-        blocks.append(h3("📋 今日の日経ヘッドライン"))
-        for title, link in nikkei_items:
-            blocks.append(bul(title, link or None))
+        blocks.append(callout_rt([rt(nikkei_analysis[:1900])], "📰", "yellow_background"))
+        blocks.append(toggle(
+            f"📋 日経ヘッドライン（{len(nikkei_items)}件・クリックで開く）",
+            [bul(t, l or None) for t, l in nikkei_items]))
         blocks.append(divider())
     elif os.environ.get("NIKKEI_EMAIL"):
         blocks.append(h2("📰 日経新聞ピックアップ"))
-        blocks.append(para("ログインに失敗しました。メールアドレス・パスワードを確認してください。"))
+        blocks.append(callout_rt([rt("ログインに失敗しました。メール/パスワードを確認してください。")],
+                                 "⚠️", "orange_background"))
         blocks.append(divider())
 
-    # カテゴリ別詳細
-    blocks.append(h2("📋 カテゴリ別詳細"))
+    # 📋 カテゴリ別ニュース（各カテゴリをトグルに折りたたみ）
+    blocks.append(h2("📋 カテゴリ別ニュース（クリックで展開）"))
     for category, items in category_news.items():
-        blocks.append(h3(category))
-        # 新潟カテゴリは新潟日報を先頭に追加
+        children, cnt = [], len(items)
         if category == "🌾 新潟・地域経済" and niigata_nippo_items:
-            blocks.append(para("📰 新潟日報"))
-            for title, link in niigata_nippo_items:
-                blocks.append(bul(title, link or None))
+            children.append(para("📰 新潟日報"))
+            children += [bul(t, l or None) for t, l in niigata_nippo_items]
+            cnt += len(niigata_nippo_items)
             if items:
-                blocks.append(para("📡 その他（Google News）"))
+                children.append(para("📡 その他（Google News）"))
         elif category == "🌾 新潟・地域経済" and os.environ.get("NIIGATA_NIPPO_EMAIL"):
-            blocks.append(para("⚠️ 新潟日報ログイン失敗。メールアドレス・パスワードを確認してください。"))
+            children.append(para("⚠️ 新潟日報ログイン失敗。メール/パスワードを確認してください。"))
         if items:
-            for title, link in items:
-                blocks.append(bul(title, link or None))
-        elif category != "🌾 新潟・地域経済" or not niigata_nippo_items:
-            blocks.append(para("ニュース取得できませんでした"))
-    blocks.append(divider())
+            children += [bul(t, l or None) for t, l in items]
+        if not children:
+            children = [para("ニュース取得できませんでした")]
+        blocks.append(toggle(f"{category}（{cnt}件）", children))
+    blocks.append(freshness_note())
 
     title = f"{date_str} {time_str} ニュースダイジェスト".replace("  ", " ").strip()
     url = create_page(title, blocks, "📰")
