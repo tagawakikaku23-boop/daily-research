@@ -24,7 +24,7 @@ jobs:
           python-version: '3.11'
 
       - name: パッケージインストール
-        run: pip install yfinance feedparser requests groq
+        run: pip install yfinance feedparser requests groq jpholiday
 
       - name: 監視銘柄を更新
         env:

@@ -13,6 +13,15 @@ on:
         required: false
         default: 'manual'
 
+# スナップショット（前回シグナル・発掘履歴）をリポジトリへ書き戻すための権限
+permissions:
+  contents: write
+
+# 同時実行を防ぐ（スナップショットのpush競合回避）
+concurrency:
+  group: daily-report
+  cancel-in-progress: false
+
 jobs:
   run-report:
     runs-on: ubuntu-latest
@@ -27,7 +36,7 @@ jobs:
           python-version: '3.11'
 
       - name: パッケージインストール
-        run: pip install yfinance feedparser requests groq beautifulsoup4 playwright
+        run: pip install yfinance feedparser requests groq beautifulsoup4 playwright jpholiday
 
       - name: Playwright Chromiumインストール
         run: playwright install chromium --with-deps
@@ -53,3 +62,18 @@ jobs:
           NIIGATA_NIPPO_EMAIL: ${{ secrets.NIIGATA_NIPPO_EMAIL }}
           NIIGATA_NIPPO_PASSWORD: ${{ secrets.NIIGATA_NIPPO_PASSWORD }}
         run: python daily_report.py ${{ steps.mode.outputs.mode }}
+
+      # 「前回からの変化」用の記憶ファイルを次回実行に引き継ぐ
+      # （このワークフローはschedule/dispatch起動のみなので、pushによる再帰起動はない）
+      - name: スナップショットを保存
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add last_snapshot.json last_discovery.json || true
+          if git diff --cached --quiet; then
+            echo "スナップショット変更なし"
+          else
+            git commit -m "chore: レポート記憶ファイルを更新 [auto]"
+            git pull --rebase origin main || true
+            git push
+          fi

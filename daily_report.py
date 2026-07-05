@@ -32,6 +32,27 @@ NOTION_DB_ID = os.environ.get("NOTION_DB_ID", "37afc83b-0e47-81d4-901d-d20a95812
 # 監視銘柄DB（Notionでワンタッチ追加）。未設定/失敗時は watchlist.csv にフォールバック
 NOTION_WATCHLIST_DB_ID = os.environ.get("NOTION_WATCHLIST_DB_ID", "3555cab9-4828-4185-86eb-5a0614b8c0ea")
 
+# ── AI出力の文字化けガード ─────────────────────────
+# llama生成文にまれに混入する非日本語圏の文字（アラビア・ヘブライ・ハングル等）を除去する。
+# ニュース見出しなど取得データには適用しない（AI生成文のみ）。
+import re as _re
+_NON_JA_RE = _re.compile(
+    "["
+    "֐-׿"   # ヘブライ
+    "؀-ۿ"   # アラビア
+    "܀-ݏ"   # シリア
+    "ऀ-෿"   # インド系（デーヴァナーガリー等）
+    "฀-๿"   # タイ
+    "ᄀ-ᇿ"   # ハングル字母
+    "가-힯"   # ハングル
+    "]+")
+
+def clean_ai_text(text):
+    """AI生成文から日本語圏で使わない文字を除去する"""
+    if not text:
+        return text
+    return _NON_JA_RE.sub("", text)
+
 # インデックス
 INDICES = [
     ("^N225",  "日経平均"),
@@ -100,6 +121,9 @@ def _wl_text(prop):
     arr = prop.get("title") or prop.get("rich_text") or []
     return "".join(x.get("plain_text", "") for x in arr).strip()
 
+# コード→NotionページID（ニュースフラグ書き戻し用。DB読込時に埋まる）
+WATCHLIST_PAGE_IDS = {}
+
 def load_watchlist_from_notion():
     """Notionの監視銘柄DBを読む。失敗時は None を返す（CSVへフォールバック）"""
     if not NOTION_WATCHLIST_DB_ID:
@@ -126,6 +150,7 @@ def load_watchlist_from_notion():
                 kind = (p.get("区分", {}).get("select") or {}).get("name", "")
                 if not code or not name:
                     continue
+                WATCHLIST_PAGE_IDS[code] = row.get("id", "")
                 if kind == "保有":
                     shares = p.get("株数", {}).get("number") or 0
                     cost   = p.get("取得単価", {}).get("number") or 0
@@ -301,10 +326,22 @@ TSE_HOLIDAYS = {
     "2027-10-11", "2027-11-03", "2027-11-23", "2027-12-31",
 }
 
+# 祝日判定はライブラリ（jpholiday）を優先し、無い環境では手打ちリストにフォールバック
+try:
+    import jpholiday
+    _HAS_JPHOLIDAY = True
+except ImportError:
+    _HAS_JPHOLIDAY = False
+
 def is_tse_trading_day(dt):
-    """東証が開く日か（土日・祝日でないか）"""
+    """東証が開く日か（土日・祝日・年末年始でないか）"""
     if dt.weekday() >= 5:          # 5=土, 6=日
         return False
+    # 年末年始（12/31〜1/3）は東証休業
+    if (dt.month == 12 and dt.day == 31) or (dt.month == 1 and dt.day <= 3):
+        return False
+    if _HAS_JPHOLIDAY:
+        return not jpholiday.is_holiday(dt.date())
     return dt.strftime("%Y-%m-%d") not in TSE_HOLIDAYS
 
 def market_status(now):
@@ -585,7 +622,7 @@ def generate_discovery_comment(picks):
             max_tokens=700,
         )
         out = {}
-        for ln in r.choices[0].message.content.splitlines():
+        for ln in clean_ai_text(r.choices[0].message.content).splitlines():
             if "|" in ln:
                 parts = [p.strip() for p in ln.split("|")]
                 code = parts[0].split()[0] if parts[0] else ""
@@ -1021,13 +1058,15 @@ def generate_macro_analysis(macro_text, macro_news, mode="morning", today_str=""
   「今後の注目」として扱い、過去の発表（例：先週の雇用統計）は「発表済み」と明記する。
   「明日」「来週」などの相対表現は使わず実日付に直す。
 
+- 出力は日本語のみ。他言語の文字（アラビア文字等）を混ぜない。
+
 事実とニュースに基づき憶測を避け、4〜6行で簡潔に。同じ言い回しの繰り返しを避けること。"""
         r = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=700,
         )
-        return r.choices[0].message.content
+        return clean_ai_text(r.choices[0].message.content)
     except Exception as e:
         return f"マクロ解説生成失敗: {e}"
 
@@ -1051,13 +1090,13 @@ def generate_weekend_outlook(us_text, news_text, today_str):
 - 経済イベントは「○月○日」と日付を添え、本日({today_str})より後の予定だけ。過去のものは書かない。
 - 半導体が強ければ半導体関連、円安なら輸出関連…のように、どのセクター/銘柄傾向に効きそうかを一言。
 
-4〜6行で簡潔に。最後に「※あくまで気配。寄り付きで確認を」と添える。"""
+出力は日本語のみ。4〜6行で簡潔に。最後に「※あくまで気配。寄り付きで確認を」と添える。"""
         r = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=700,
         )
-        return r.choices[0].message.content
+        return clean_ai_text(r.choices[0].message.content)
     except Exception as e:
         return f"週明け気配の生成失敗: {e}"
 
@@ -1067,6 +1106,7 @@ def generate_advice(portfolio_summary, news_summary):
         client = Groq(api_key=GROQ_API_KEY)
         prompt = f"""あなたは日本株・米国株に詳しい投資アドバイザーです。
 以下のポートフォリオデータと最新ニュースをもとに、今日のアドバイスをください。
+出力は日本語のみ（他言語の文字を混ぜない）。
 
 【投資方針・好み】
 - 基本思想：両学長（リベラルアーツ大学）と山崎元氏の影響を強く受けている
@@ -1097,7 +1137,7 @@ def generate_advice(portfolio_summary, news_summary):
             messages=[{"role": "user", "content": prompt}],
             max_tokens=1000,
         )
-        return response.choices[0].message.content
+        return clean_ai_text(response.choices[0].message.content)
     except Exception as e:
         return f"AIアドバイス生成失敗: {e}"
 
@@ -1126,7 +1166,7 @@ def generate_nikkei_analysis(nikkei_headlines):
             messages=[{"role": "user", "content": prompt}],
             max_tokens=1200,
         )
-        return response.choices[0].message.content
+        return clean_ai_text(response.choices[0].message.content)
     except Exception as e:
         return f"日経AIコメント生成失敗: {e}"
 
@@ -1155,7 +1195,7 @@ def generate_news_digest(all_news_text):
             messages=[{"role": "user", "content": prompt}],
             max_tokens=3000,
         )
-        return response.choices[0].message.content
+        return clean_ai_text(response.choices[0].message.content)
     except Exception as e:
         return f"ダイジェスト生成失敗: {e}"
 
@@ -1413,7 +1453,7 @@ def generate_evening_memo(macro_text, movers_text, today_str=""):
             messages=[{"role": "user", "content": prompt}],
             max_tokens=600,
         )
-        return r.choices[0].message.content
+        return clean_ai_text(r.choices[0].message.content)
     except Exception as e:
         return f"夜メモ生成失敗: {e}"
 
@@ -1462,6 +1502,33 @@ def collect_portfolio(usdjpy):
         time.sleep(0.3)
 
     return data
+
+def write_news_flags(data):
+    """朝夜レポートで検出したニュースフラグを監視銘柄DBへ書き戻す（best-effort）。
+    30分毎の指標更新(refresh_watchlist.py)がこの列を読んで判定に反映する。"""
+    if not (NOTION_WATCHLIST_DB_ID and WATCHLIST_PAGE_IDS):
+        return
+    headers = {"Authorization": f"Bearer {NOTION_API_KEY}",
+               "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
+    rows = [(t, risks, goods) for t, n, s, c, d, nw, risks, goods, l in data["holdings"]]
+    rows += [(t, risks, goods) for t, n, d, nw, risks, goods, l in data["watch"]]
+    rows += [(t, risks, goods) for t, n, d, nw, risks, goods, l in data["monitor"]]
+    ok = 0
+    for code, risks, goods in rows:
+        pid = WATCHLIST_PAGE_IDS.get(code)
+        if not pid:
+            continue
+        flags = "・".join((risks or []) + (goods or []))
+        body = {"properties": {"ニュースフラグ": {
+            "rich_text": ([{"text": {"content": flags[:200]}}] if flags else [])}}}
+        try:
+            r = requests.patch(f"https://api.notion.com/v1/pages/{pid}",
+                               headers=headers, json=body, timeout=30)
+            r.raise_for_status()
+            ok += 1
+        except Exception:
+            continue
+    print(f"  ニュースフラグ書き戻し: {ok}/{len(rows)}件")
 
 def dividend_blocks(holdings, usdjpy, total_div):
     """配当キャッシュフローのブロックを生成（ETF円換算済み）"""
@@ -1693,6 +1760,7 @@ def create_morning_page(date_str, now_str, title, icon):
     # データ収集（TL;DR等で使うので先に）
     print("  銘柄データ収集中...")
     data = collect_portfolio(usdjpy)
+    write_news_flags(data)   # 監視銘柄DBの判定をニュース連動させる
 
     status = market_status(datetime.now(timezone(timedelta(hours=9))))
     blocks = [callout_rt([rt(f"生成: {now_str}", bold=True), rt("　｜　朝＝今日これからの戦略")],
@@ -1810,7 +1878,7 @@ def create_morning_page(date_str, now_str, title, icon):
                 if len(c) >= 2 and c[1]:
                     blocks.append(bul(f"🔎 {c[1]}"))
             # 採用方法（コピペ用の1行）
-            blocks.append(bul(f"📌 採用するには：watchlist.csv に「{ticker},{name},監視」を追記 → 次回から自動で追跡"))
+            blocks.append(bul(f"📌 採用するには：📋 監視銘柄リストで ＋New → コード「{ticker}」銘柄名「{name}」区分「監視」を入力 → 次回から自動で追跡"))
     else:
         blocks.append(para("本日は条件を満たす発掘銘柄なし（無理に提案しません）"))
     blocks.append(divider())
@@ -1849,6 +1917,7 @@ def create_evening_page(date_str, now_str, title, icon):
     # データ収集（TL;DR等で先に使う）
     print("  銘柄データ収集中...")
     data = collect_portfolio(usdjpy)
+    write_news_flags(data)   # 監視銘柄DBの判定をニュース連動させる
 
     status = market_status(datetime.now(timezone(timedelta(hours=9))))
     blocks = [callout_rt([rt(f"生成: {now_str}", bold=True), rt("　｜　夜＝今日の結果の振り返り")],

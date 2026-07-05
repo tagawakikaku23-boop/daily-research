@@ -68,7 +68,7 @@ def translate_summary(ticker, name):
                        f"次の会社（{name}）の事業内容を、日本語で1文・40字以内に要約。"
                        f"誇張せず事実のみ。\n\n{summ[:1500]}"}],
             max_tokens=120)
-        return r.choices[0].message.content.strip().replace("\n", " ")
+        return m.clean_ai_text(r.choices[0].message.content).strip().replace("\n", " ")
     except Exception as e:
         print(f"    事業内容生成失敗 {ticker}: {e}")
         return ""
@@ -88,7 +88,7 @@ def claude_comment(name, d):
                        f"長期インカム（高配当・連続増配）投資家向けに、{name}（{facts}）への"
                        f"一言所感を日本語50字以内で。誇張・断定を避け、提示数値の範囲で。"}],
             max_tokens=120)
-        return r.choices[0].message.content.strip().replace("\n", " ")
+        return m.clean_ai_text(r.choices[0].message.content).strip().replace("\n", " ")
     except Exception as e:
         print(f"    コメント生成失敗 {name}: {e}")
         return ""
@@ -125,6 +125,13 @@ def main():
             print(f"  {code} {name}: 取得失敗")
             continue
 
+        # 直近の朝夜レポートが書き込んだニュースフラグを判定に反映（レポートと同一基準）
+        # フラグ語は daily_report の分類辞書（NEWS_RISK/NEWS_POSITIVE）の定義値と照合する
+        flags_txt = ptext(p.get("ニュースフラグ"))
+        words = [w for w in flags_txt.split("・") if w] if flags_txt else []
+        risks = [w for w in words if w in set(m.NEWS_RISK.values())]
+        goods = [w for w in words if w in set(m.NEWS_POSITIVE.values())]
+
         props = {
             "現在値":      {"number": num(d["price"])},
             "前日比%":     {"number": num(d["chg_pct"])},
@@ -133,7 +140,7 @@ def main():
             "PER":        {"number": num(d.get("per"))},
             "PBR":        {"number": num(d.get("pbr"))},
             "52W位置%":    {"number": num(d["position"] * 100, 0)},
-            "判定":        {"rich_text": [{"text": {"content": m.trade_signal(d["position"], d.get("div_yield") or 0)}}]},
+            "判定":        {"rich_text": [{"text": {"content": m.trade_signal(d["position"], d.get("div_yield") or 0, None, risks, goods)}}]},
             "更新時刻":    {"rich_text": [{"text": {"content": stamp}}]},
         }
 
