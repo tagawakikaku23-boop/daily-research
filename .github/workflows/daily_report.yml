@@ -1,10 +1,11 @@
 name: 毎日リサーチ日報
 
 on:
-  # 朝07:00（JST）= UTC 22:00 ／ 夜19:00（JST）= UTC 10:00
+  # GitHubの定時実行は30分〜2時間遅延するため、届けたい時刻より前倒しで予約する
+  # 朝: JST 06:15 予約 → 実際は07:00前後に生成 ／ 夜: JST 18:15 予約 → 19:00前後に生成
   schedule:
-    - cron: '0 22 * * *'   # 朝レポート
-    - cron: '0 10 * * *'   # 夜レポート
+    - cron: '15 21 * * *'   # 朝レポート（UTC 21:15 = JST 06:15）
+    - cron: '15 9 * * *'    # 夜レポート（UTC 09:15 = JST 18:15）
   # 手動実行（trigger.html のボタン）。mode未指定なら manual
   workflow_dispatch:
     inputs:
@@ -46,7 +47,7 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "mode=${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event.schedule }}" = "0 22 * * *" ]; then
+          elif [ "${{ github.event.schedule }}" = "15 21 * * *" ]; then
             echo "mode=morning" >> "$GITHUB_OUTPUT"
           else
             echo "mode=evening" >> "$GITHUB_OUTPUT"
