@@ -1,0 +1,29 @@
+name: 月次資産レビュー
+
+on:
+  # 毎月1日 JST 06:15 予約（Actionsの遅延込みで7時前後に生成）
+  schedule:
+    - cron: '15 21 1 * *'
+  workflow_dispatch:
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: リポジトリを取得
+        uses: actions/checkout@v4
+
+      - name: Python セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: パッケージインストール
+        run: pip install yfinance feedparser requests groq jpholiday
+
+      - name: 月次レビュー実行
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          NOTION_PAGE_ID: ${{ secrets.NOTION_PAGE_ID }}
+        run: python monthly_review.py

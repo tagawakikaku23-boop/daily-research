@@ -1392,7 +1392,7 @@ def signal_color(signal):
     return None
 
 # アイコン→「種類」セレクト値の対応（DB分類用）
-_ICON_KIND = {"🌅": "🌅 朝", "🌙": "🌙 夜", "🔄": "🔄 手動", "📰": "📰 ニュース"}
+_ICON_KIND = {"🌅": "🌅 朝", "🌙": "🌙 夜", "🔄": "🔄 手動", "📰": "📰 ニュース", "📊": "📊 月次"}
 
 def create_page(title, blocks, icon="📋"):
     headers = {
