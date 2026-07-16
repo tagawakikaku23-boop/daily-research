@@ -1392,7 +1392,7 @@ def signal_color(signal):
     return None
 
 # アイコン→「種類」セレクト値の対応（DB分類用）
-_ICON_KIND = {"🌅": "🌅 朝", "🌙": "🌙 夜", "🔄": "🔄 手動", "📰": "📰 ニュース", "📊": "📊 月次"}
+_ICON_KIND = {"🌅": "🌅 朝", "🌙": "🌙 夜", "🔄": "🔄 手動", "📰": "📰 ニュース", "📊": "📊 月次", "🛒": "🛒 週次"}
 
 def create_page(title, blocks, icon="📋"):
     headers = {
@@ -1422,8 +1422,22 @@ def create_page(title, blocks, icon="📋"):
             "properties": {"title":{"title":[{"text":{"content":title}}]}},
             "children": blocks[:100],
         }
-    resp = requests.post("https://api.notion.com/v1/pages", headers=headers, json=data)
-    resp.raise_for_status()
+    # Notion側の一時エラー（5xx/429/瞬断）に備えてリトライ
+    resp = None
+    for attempt in range(3):
+        try:
+            resp = requests.post("https://api.notion.com/v1/pages",
+                                 headers=headers, json=data, timeout=60)
+            if resp.status_code in (429, 500, 502, 503, 504):
+                raise requests.HTTPError(f"status {resp.status_code}")
+            resp.raise_for_status()
+            break
+        except Exception as e:
+            if attempt < 2:
+                print(f"  Notionページ作成リトライ({attempt+1}/3): {e}")
+                time.sleep(10 * (attempt + 1))
+                continue
+            raise
     pid = resp.json()["id"]
     if len(blocks) > 100:
         for i in range(100, len(blocks), 100):
@@ -2117,6 +2131,206 @@ def create_news_page(date_str, time_str=""):
     print(f"ニュースページ完了: {url}")
     return url
 
+# ── 週次「今週の買い場チェック」（月曜 07:30）─────────
+def get_next_earnings(ticker):
+    """次回決算発表日を取得（yfinance calendar。取れなければ None）"""
+    try:
+        cal = yf.Ticker(ticker).calendar
+        dates = cal.get("Earnings Date") if isinstance(cal, dict) else None
+        if not dates:
+            return None
+        d = dates[0]
+        # datetime / date / Timestamp のいずれでも date に揃える
+        if hasattr(d, "date") and callable(getattr(d, "date")):
+            d = d.date()
+        return d
+    except Exception:
+        return None
+
+def generate_weekly_comment(picks_text, cautions_text, today_str):
+    """週次のひとことコメント（Groq）。失敗しても本文は成立するのでbest-effort"""
+    try:
+        client = Groq(api_key=GROQ_API_KEY)
+        prompt = f"""あなたは長期インカム（高配当・連続増配）投資家に寄り添うアドバイザーです。本日は {today_str}（月曜の朝）です。
+
+【今週、水準として魅力的と機械判定された銘柄】
+{picks_text or "特になし"}
+
+【保有銘柄の注意点】
+{cautions_text or "特になし"}
+
+以下を日本語で簡潔に（合計5行以内）：
+1. 🛒 今週の買い方のスタンス（分割買い前提で、焦らないための一言。特定銘柄を「買え」とは書かない）
+2. 💬 ひとことメモ（長期インカム投資家の心構え。毎回同じ言い回しは避ける）
+※「買うべき」等の断定は禁止。「水準として魅力的」「様子見が無難」のような表現に留める。"""
+        r = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=400,
+        )
+        return clean_ai_text(r.choices[0].message.content)
+    except Exception as e:
+        return ""
+
+def create_weekly_page(date_str, now_str, title, icon="🛒"):
+    print("\n==== 🛒 今週の買い場チェック作成中 ====")
+    JST    = timezone(timedelta(hours=9))
+    now    = datetime.now(JST)
+    status = market_status(now)
+    usdjpy = get_usdjpy_rate() or 1
+    data   = collect_portfolio(usdjpy)
+
+    blocks = []
+    # 冒頭: 位置づけとデータ鮮度
+    intro = [rt("毎週月曜の「今週の買い場チェック」。", bold=True),
+             rt(" 株価・指標は本日取得分（カッコ内は株価の最終取引日）。")]
+    if not status["open"]:
+        intro.append(rt(f" {status['reason']}のため、株価は直近取引日の終値です。", color="orange"))
+    blocks.append(callout_rt(intro, "🛒", "blue_background"))
+
+    # ── 1. 保有銘柄: 注意ピックアップ ──
+    blocks.append(h2("⚠️ 保有銘柄の注意ピックアップ"))
+    cautions = []
+    caution_lines = []
+    for ticker, name, shares, cost, d, news, risks, goods, line in data["holdings"]:
+        if not d or "error" in d:
+            cautions.append(bul(f"{name}: データ取得失敗（要確認）"))
+            continue
+        px   = d["price"] * usdjpy if is_usd_ticker(ticker) else d["price"]
+        gain = (px - cost) / cost * 100
+        sig  = data["signals"].get(name, "")
+        reasons = []
+        if risks:
+            reasons.append("・".join(risks[:3]) + "のニュースあり")
+        if gain < 0:
+            reasons.append(f"取得比{gain:.1f}%の含み損")
+        if (d.get("div_yield") or 0) == 0:
+            reasons.append("無配（インカム方針とズレ）")
+        if not reasons and ("⛔" in sig or "🔴" in sig):
+            reasons.append(sig)
+        if reasons:
+            txt = f"{name}: {'、'.join(reasons)}"
+            cautions.append(bul(txt + (f" → {sig}" if sig and sig not in txt else "")))
+            caution_lines.append(txt)
+            for t, l in (news or [])[:2]:
+                cautions.append(toggle(f"　📎 {name}の関連ニュース", [bul(t, l or None)]))
+                break
+    if cautions:
+        blocks.extend(cautions)
+    else:
+        blocks.append(para("今週は特に注意が必要な保有銘柄はありません。"))
+    # 保有全体の水準（折りたたみ）
+    rows = []
+    for ticker, name, shares, cost, d, news, risks, goods, line in data["holdings"]:
+        if not d or "error" in d:
+            rows.append([cell(name), cell("取得失敗", "red")])
+            continue
+        px   = d["price"] * usdjpy if is_usd_ticker(ticker) else d["price"]
+        gain = (px - cost) / cost * 100
+        sig  = data["signals"].get(name, "")
+        asof = f"({d['asof']})" if d.get("asof") else ""
+        rows.append([
+            cell(name),
+            cell(format_price(ticker, d["price"]) + asof),
+            cell(_signed(gain), "red" if gain < 0 else "green"),
+            cell(f"{(d.get('div_yield') or 0):.1f}%"),
+            cell(sig, signal_color(sig)),
+        ])
+    blocks.append(toggle("📋 保有全銘柄の水準（クリックで開く）",
+                         [table(["銘柄", "現在値", "取得比", "配当", "判定"], rows)]))
+    blocks.append(divider())
+
+    # ── 2. 候補・監視: 買い場に近い順 ──
+    blocks.append(h2("🎯 候補・監視銘柄の買い場チェック"))
+    cands = []
+    for kind, lst in (("候補", data["watch"]), ("監視", data["monitor"])):
+        for ticker, name, d, news, risks, goods, line in lst:
+            if not d or "error" in d:
+                continue
+            sig = trade_signal(d["position"], d["div_yield"], None, risks, goods)
+            cands.append((kind, ticker, name, d, risks, goods, sig))
+    # 52週位置が低く配当が高いほど上位（買い場に近い順）
+    cands.sort(key=lambda c: c[3]["position"] - (c[3].get("div_yield") or 0) / 100.0)
+    near_buy   = [c for c in cands if "🟢" in c[6]]
+    pick_lines = []
+    if near_buy:
+        blocks.append(h3("🟢 水準として魅力的（買い場に近い）"))
+        for kind, ticker, name, d, risks, goods, sig in near_buy:
+            why = [f"52週レンジ下から{int(d['position']*100)}%",
+                   f"配当{(d.get('div_yield') or 0):.1f}%"]
+            try:
+                if d.get("pbr"): why.append(f"PBR{float(d['pbr']):.2f}")
+            except (ValueError, TypeError):
+                pass
+            if goods:
+                why.append("＋" + "・".join(goods[:2]))
+            txt = f"[{kind}] {name}  {format_price(ticker, d['price'])}  {'／'.join(why)}"
+            blocks.append(bul(txt))
+            pick_lines.append(txt)
+    else:
+        blocks.append(para("今週は「買い場に近い」と機械判定できる候補・監視銘柄はありません。"))
+    # 候補・監視全体（折りたたみ）
+    rows = []
+    for kind, ticker, name, d, risks, goods, sig in cands:
+        try:
+            per = f"{float(d['per']):.1f}" if d.get("per") else "―"
+        except (ValueError, TypeError):
+            per = "―"
+        try:
+            pbr = f"{float(d['pbr']):.2f}" if d.get("pbr") else "―"
+        except (ValueError, TypeError):
+            pbr = "―"
+        asof = f"({d['asof']})" if d.get("asof") else ""
+        rows.append([
+            cell(name), cell(kind),
+            cell(format_price(ticker, d["price"]) + asof),
+            cell(f"{(d.get('div_yield') or 0):.1f}%"),
+            cell(per), cell(pbr),
+            cell(f"{int(d['position']*100)}%"),
+            cell(sig, signal_color(sig)),
+        ])
+    blocks.append(toggle("📋 候補・監視の全銘柄（クリックで開く）",
+                         [table(["銘柄", "区分", "現在値", "配当", "PER", "PBR", "52W位置", "判定"], rows)]))
+    blocks.append(divider())
+
+    # ── 3. 今週の注目（決算予定・休場日） ──
+    blocks.append(h2("📅 今週の注目"))
+    events = []
+    week_end = (now + timedelta(days=7)).date()
+    all_stocks = [(t, n) for t, n, _, _ in HOLDINGS] + list(WATCHLIST) + list(MONITOR)
+    print("  決算予定日を取得中...")
+    for ticker, name in all_stocks:
+        ed = get_next_earnings(ticker)
+        if ed and now.date() <= ed <= week_end:
+            clean = name.replace("★", "").split("連続増配")[0].strip()
+            events.append((ed, f"{ed.strftime('%m/%d')} {clean} 決算発表（予定）"))
+        time.sleep(0.2)
+    for i in range(1, 8):
+        day = now + timedelta(days=i)
+        if day.weekday() < 5 and not is_tse_trading_day(day):
+            events.append((day.date(), f"{day.strftime('%m/%d')} 東証休場（祝日）"))
+    if events:
+        for _, label in sorted(events, key=lambda e: str(e[0])):
+            blocks.append(bul(label))
+        blocks.append(para("※ 決算日はyfinanceの自動取得のため、正式な会社発表と数日ずれる場合があります。"))
+    else:
+        blocks.append(para("今週は決算発表・休場の予定を自動取得できませんでした（各社IRをご確認ください）。"))
+    blocks.append(divider())
+
+    # ── 4. AIひとこと＋締め ──
+    print("  週次コメント生成中...")
+    ai = generate_weekly_comment("\n".join(pick_lines), "\n".join(caution_lines), date_str)
+    if ai:
+        blocks.append(callout_rt([rt(ai[:1900])], "💬", "purple_background"))
+    blocks.append(freshness_note())
+    blocks.append(callout_rt(
+        [rt("これは判断のたたき台です。特定銘柄の売買を推奨するものではなく、最終的な投資判断はご自身でお願いします。")],
+        "🙏", "gray_background"))
+
+    url = create_page(title, blocks, icon)
+    print(f"週次買い場チェック完了: {url}")
+    return url
+
 # ── メイン ────────────────────────────────────────
 def resolve_mode(hour):
     """引数 or 現在時刻からモードを決定（morning / evening / manual）"""
@@ -2127,6 +2341,8 @@ def resolve_mode(hour):
         return "evening"
     if arg in ("manual", "手動"):
         return "manual"
+    if arg in ("weekly", "週次", "week"):
+        return "weekly"
     # 引数なし → 時刻で自動判定（15時より前=朝、以降=夜）
     return "morning" if hour < 15 else "evening"
 
@@ -2148,10 +2364,18 @@ def main():
             stock_url = create_morning_page(date_str, now_str, title, icon)
         else:
             stock_url = create_evening_page(date_str, now_str, title, icon)
-            news_url  = create_news_page(date_str, time_str)
+            try:
+                news_url = create_news_page(date_str, time_str)
+            except Exception as e:
+                news_url = f"生成失敗: {e}"
+                print(f"  ⚠️ ニュースダイジェスト生成失敗（株レポートは完了済み）: {e}")
             print(f"\n=== 手動(夜)完了 ===\n株式 : {stock_url}\nニュース : {news_url}")
             return
         print(f"\n=== 手動(朝)完了 ===\n株式 : {stock_url}")
+    elif mode == "weekly":
+        title = f"{date_str} 今週の買い場チェック"
+        stock_url = create_weekly_page(date_str, now_str, title, "🛒")
+        print(f"\n=== 週次完了 ===\n買い場チェック : {stock_url}")
     elif mode == "morning":
         title = f"{date_str} {time_str} 朝の株レポート"
         stock_url = create_morning_page(date_str, now_str, title, "🌅")
@@ -2160,7 +2384,12 @@ def main():
         title = f"{date_str} {time_str} 夜の株レポート"
         stock_url = create_evening_page(date_str, now_str, title, "🌙")
         # 夜は振り返り回。ニュースダイジェストも夜に付ける
-        news_url = create_news_page(date_str, time_str)
+        # （ニュース側が失敗しても株レポートは完了扱いにする＝全滅防止）
+        try:
+            news_url = create_news_page(date_str, time_str)
+        except Exception as e:
+            news_url = f"生成失敗: {e}"
+            print(f"  ⚠️ ニュースダイジェスト生成失敗（株レポートは完了済み）: {e}")
         print(f"\n=== 夜の完了 ===\n株式 : {stock_url}\nニュース : {news_url}")
 
 if __name__ == "__main__":
