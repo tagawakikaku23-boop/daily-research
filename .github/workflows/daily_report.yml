@@ -1,12 +1,10 @@
 name: 毎日リサーチ日報
 
 on:
-  # GitHubの定時実行は30分〜2時間遅延するため、届けたい時刻より前倒しで予約する
-  # 朝: JST 06:15 予約 → 実際は07:00前後に生成 ／ 夜: JST 18:15 予約 → 19:00前後に生成
-  schedule:
-    - cron: '15 21 * * *'   # 朝レポート（UTC 21:15 = JST 06:15）
-    - cron: '15 9 * * *'    # 夜レポート（UTC 09:15 = JST 18:15）
-  # 手動実行（trigger.html のボタン）。mode未指定なら manual
+  # 定時実行は Windows タスクスケジューラ（DailyResearch_Morning/Evening/Weekly）へ
+  # 一本化したため、ここの schedule は停止している（2026-08-27）。
+  # 復活させると PC 側と合わせて 1 日 2 本の二重投稿になるので注意。
+  # 手動実行（trigger.html のボタン）は従来どおり使える。mode未指定なら manual
   workflow_dispatch:
     inputs:
       mode:
