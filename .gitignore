@@ -3,5 +3,6 @@ log.txt
 trigger.html
 run_morning.bat
 run_evening.bat
+run_weekly.bat
 __pycache__/
 *.pyc
