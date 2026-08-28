@@ -53,6 +53,47 @@ def clean_ai_text(text):
         return text
     return _NON_JA_RE.sub("", text)
 
+# ── 使用するGroqモデル（廃止されたら自動で次の候補へ）──────────
+# 2026-08-28: llama-3.3-70b-versatile がGroq側で廃止されたため gpt-oss-120b へ移行。
+# 環境変数 GROQ_MODEL で先頭候補を上書きできる。
+GROQ_MODEL_CANDIDATES = [
+    os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b"),
+    "qwen/qwen3.8-27b",
+    "openai/gpt-oss-20b",
+]
+_groq_model_cache = None
+
+def groq_model():
+    """実際に使えるモデルを1回だけ解決してキャッシュする。
+    第一候補が廃止されていれば次の候補へ自動フォールバックする。
+    一覧取得に失敗した場合は第一候補をそのまま使う（従来動作）。"""
+    global _groq_model_cache
+    if _groq_model_cache:
+        return _groq_model_cache
+    try:
+        available = {m.id for m in Groq(api_key=GROQ_API_KEY).models.list().data}
+    except Exception:
+        available = set()
+    chosen = GROQ_MODEL_CANDIDATES[0]
+    if available:
+        for cand in GROQ_MODEL_CANDIDATES:
+            if cand in available:
+                chosen = cand
+                break
+        if chosen != GROQ_MODEL_CANDIDATES[0]:
+            print(f"  ℹ️ Groqモデルを {chosen} に切替（第一候補が利用不可）")
+    _groq_model_cache = chosen
+    return chosen
+
+
+def groq_extra():
+    """モデル固有の追加パラメータ。
+    gpt-oss系は推論モデルで、既定のままだと「思考」に出力枠を使い切って
+    本文が空になったり途中で切れたりする。そのため推論を低めに固定する。"""
+    if "gpt-oss" in groq_model():
+        return {"reasoning_effort": "low"}
+    return {}
+
 # インデックス
 INDICES = [
     ("^N225",  "日経平均"),
@@ -617,7 +658,7 @@ def generate_discovery_comment(picks):
 【対象】
 {data_text}"""
         r = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=groq_model(), **groq_extra(),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=700,
         )
@@ -1062,7 +1103,7 @@ def generate_macro_analysis(macro_text, macro_news, mode="morning", today_str=""
 
 事実とニュースに基づき憶測を避け、4〜6行で簡潔に。同じ言い回しの繰り返しを避けること。"""
         r = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=groq_model(), **groq_extra(),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=700,
         )
@@ -1092,7 +1133,7 @@ def generate_weekend_outlook(us_text, news_text, today_str):
 
 出力は日本語のみ。4〜6行で簡潔に。最後に「※あくまで気配。寄り付きで確認を」と添える。"""
         r = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=groq_model(), **groq_extra(),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=700,
         )
@@ -1133,7 +1174,7 @@ def generate_advice(portfolio_summary, news_summary):
 6. 📰 今日のニュースで保有銘柄・検討銘柄に影響しそうな話題"""
 
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=groq_model(), **groq_extra(),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=1000,
         )
@@ -1162,7 +1203,7 @@ def generate_nikkei_analysis(nikkei_headlines):
 6. 💬 今日の一言まとめ（全体を通じた今日のキーメッセージを2〜3行で）"""
 
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=groq_model(), **groq_extra(),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=1200,
         )
@@ -1191,7 +1232,7 @@ def generate_news_digest(all_news_text):
 
 （25〜30点）"""
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=groq_model(), **groq_extra(),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=3000,
         )
@@ -1463,7 +1504,7 @@ def generate_evening_memo(macro_text, movers_text, today_str=""):
      過去に発表済みのイベント（例：先週の雇用統計）は書かない。「明日」等の相対表現は実日付に直す。
 2. 💬 ひとことメモ（長期インカム投資家としての心構えを2〜3行。淡々と・分割で・狼狽売りしない等。毎回同じ言い回しは避ける）"""
         r = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=groq_model(), **groq_extra(),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=600,
         )
@@ -1726,6 +1767,20 @@ def news_toggle(label, items):
     children = [bul(t, link or None) for t, link in items]
     return toggle(f"📎 {label}（クリックで開く）", children)
 
+def long_callout(text, emoji="💡", color=None, limit=1800):
+    """長いAI文を行の切れ目で分割し、複数のコールアウトとして返す。
+    1ブロック2000文字のNotion制限で末尾が切り捨てられるのを防ぐ。"""
+    blocks, chunk = [], ""
+    for line in (text or "").splitlines(keepends=True):
+        if len(chunk) + len(line) > limit and chunk.strip():
+            blocks.append(callout_rt([rt(chunk.strip())], emoji, color))
+            chunk = line
+        else:
+            chunk += line
+    if chunk.strip():
+        blocks.append(callout_rt([rt(chunk.strip())], emoji, color))
+    return blocks or [callout_rt([rt("（生成なし）")], emoji, color)]
+
 def freshness_note():
     return callout_rt(
         [rt("※ データは本日取得分。古い記事は載せず、過去の事例は「過去の参照」と明示時のみ引用。")],
@@ -1757,7 +1812,7 @@ def build_weekend_section(status, snap, date_str):
         macro_snapshot_text(snap),
         "\n".join(f"・{t}" for t, _ in news) or "（ニュース取得なし）", date_str)
     blocks.append(h3("🔮 週明けの気配"))
-    blocks.append(callout_rt([rt(ai[:1900])], "🔮", "purple_background"))
+    blocks.extend(long_callout(ai, "🔮", "purple_background"))
     if news:
         blocks.append(news_toggle("週明け関連ニュース", news[:5]))
     blocks.append(divider())
@@ -1826,7 +1881,7 @@ def create_morning_page(date_str, now_str, title, icon):
     print("  マクロ解説生成中...")
     macro_ai = generate_macro_analysis(macro_txt, macro_news, "morning", date_str)
     blocks.append(h2("② 今日の相場観"))
-    blocks.append(callout_rt([rt(macro_ai[:1900])], "🧭", "blue_background"))
+    blocks.extend(long_callout(macro_ai, "🧭", "blue_background"))
     if macro_news:
         blocks.append(news_toggle("相場の理由ニュース", macro_news[:5]))
     blocks.append(divider())
@@ -1868,7 +1923,7 @@ def create_morning_page(date_str, now_str, title, icon):
                              "\n".join(data["news_lines"][:20]) or "ニュースなし")
     blocks.append(h2("⑥ 今日の買い増し助言・新規注目"))
     blocks.append(callout_rt([rt("予算目安: 1回10〜30万円・分割で。NISA成長枠が残れば高配当はNISA優先")], "💴", "blue_background"))
-    blocks.append(callout_rt([rt(advice[:1900])], "💡", "yellow_background"))
+    blocks.extend(long_callout(advice, "💡", "yellow_background"))
     blocks.append(divider())
 
     # 💎 今日の発掘銘柄（監視外からAIが提案／朝のみ）
@@ -1973,7 +2028,7 @@ def create_evening_page(date_str, now_str, title, icon):
     print("  要因分析生成中...")
     macro_ai = generate_macro_analysis(macro_txt, macro_news, "evening", date_str)
     blocks.append(h2("② 今日動いた要因の分析"))
-    blocks.append(callout_rt([rt(macro_ai[:1900])], "🔍", "yellow_background"))
+    blocks.extend(long_callout(macro_ai, "🔍", "yellow_background"))
     if macro_news:
         blocks.append(news_toggle("値動きの理由ニュース", macro_news[:5]))
     blocks.append(divider())
@@ -2032,7 +2087,7 @@ def create_evening_page(date_str, now_str, title, icon):
     print("  夜メモ生成中...")
     memo = generate_evening_memo(macro_txt, "\n".join(movers_lines[:8]), date_str)
     blocks.append(h2("⑤ 明日の注目ポイント・ひとことメモ"))
-    blocks.append(callout_rt([rt(memo[:1900])], "🔭", "blue_background"))
+    blocks.extend(long_callout(memo, "🔭", "blue_background"))
     blocks.append(divider())
 
     # 深掘り想定質問
@@ -2088,7 +2143,7 @@ def create_news_page(date_str, time_str=""):
         print("  AIダイジェスト生成中...")
         digest = generate_news_digest("\n".join(all_news_for_digest))
         blocks.append(h2("🗞️ 今日のダイジェスト（AI要約）"))
-        blocks.append(callout_rt([rt(digest[:1900])], "🗞️", "purple_background"))
+        blocks.extend(long_callout(digest, "🗞️", "purple_background"))
         blocks.append(divider())
 
     # 📰 日経新聞ピックアップ（AI所感＋ヘッドラインはトグル）
@@ -2096,7 +2151,7 @@ def create_news_page(date_str, time_str=""):
         print("  日経AIコメント生成中...")
         nikkei_analysis = generate_nikkei_analysis(nikkei_items)
         blocks.append(h2("📰 日経新聞ピックアップ"))
-        blocks.append(callout_rt([rt(nikkei_analysis[:1900])], "📰", "yellow_background"))
+        blocks.extend(long_callout(nikkei_analysis, "📰", "yellow_background"))
         blocks.append(toggle(
             f"📋 日経ヘッドライン（{len(nikkei_items)}件・クリックで開く）",
             [bul(t, l or None) for t, l in nikkei_items]))
@@ -2164,7 +2219,7 @@ def generate_weekly_comment(picks_text, cautions_text, today_str):
 2. 💬 ひとことメモ（長期インカム投資家の心構え。毎回同じ言い回しは避ける）
 ※「買うべき」等の断定は禁止。「水準として魅力的」「様子見が無難」のような表現に留める。"""
         r = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=groq_model(), **groq_extra(),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=400,
         )
@@ -2321,7 +2376,7 @@ def create_weekly_page(date_str, now_str, title, icon="🛒"):
     print("  週次コメント生成中...")
     ai = generate_weekly_comment("\n".join(pick_lines), "\n".join(caution_lines), date_str)
     if ai:
-        blocks.append(callout_rt([rt(ai[:1900])], "💬", "purple_background"))
+        blocks.extend(long_callout(ai, "💬", "purple_background"))
     blocks.append(freshness_note())
     blocks.append(callout_rt(
         [rt("これは判断のたたき台です。特定銘柄の売買を推奨するものではなく、最終的な投資判断はご自身でお願いします。")],

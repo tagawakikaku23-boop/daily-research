@@ -63,11 +63,11 @@ def translate_summary(ticker, name):
         from groq import Groq
         c = Groq(api_key=m.GROQ_API_KEY)
         r = c.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=m.groq_model(), **m.groq_extra(),
             messages=[{"role": "user", "content":
                        f"次の会社（{name}）の事業内容を、日本語で1文・40字以内に要約。"
                        f"誇張せず事実のみ。\n\n{summ[:1500]}"}],
-            max_tokens=120)
+            max_tokens=300)
         return m.clean_ai_text(r.choices[0].message.content).strip().replace("\n", " ")
     except Exception as e:
         print(f"    事業内容生成失敗 {ticker}: {e}")
@@ -83,11 +83,11 @@ def claude_comment(name, d):
                  f"PER{d.get('per') or '―'} PBR{d.get('pbr') or '―'} "
                  f"52W位置{int(d['position']*100)}%")
         r = c.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=m.groq_model(), **m.groq_extra(),
             messages=[{"role": "user", "content":
                        f"長期インカム（高配当・連続増配）投資家向けに、{name}（{facts}）への"
                        f"一言所感を日本語50字以内で。誇張・断定を避け、提示数値の範囲で。"}],
-            max_tokens=120)
+            max_tokens=300)
         return m.clean_ai_text(r.choices[0].message.content).strip().replace("\n", " ")
     except Exception as e:
         print(f"    コメント生成失敗 {name}: {e}")

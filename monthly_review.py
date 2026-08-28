@@ -123,7 +123,7 @@ def generate_review_comment(facts, today_str):
 厳守: 出力は日本語のみ。数字は提供値だけを使い創作しない。断定や煽りを避ける。
 「暴落が来る」等の予言はしない。同じ言い回しの繰り返しを避ける。"""
         r = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=m.groq_model(), **m.groq_extra(),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=700,
         )
@@ -316,7 +316,7 @@ def main():
 
     blocks += [
         m.h2("🧭 今月のレビュー（AI）"),
-        m.callout_rt([m.rt(comment[:1900])], "🧭", "purple_background"),
+        *m.long_callout(comment, "🧭", "purple_background"),
         m.callout_rt([m.rt("※ 投信・年金は指数からの推定値（誤差0.5%程度）。毎月の積立は自動反映。"
                            "マネフォのPDFをClaudeに渡すと実際の口数・現金に補正されます。")],
                      "🕒", "gray_background"),
