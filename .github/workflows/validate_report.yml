@@ -36,5 +36,7 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           NOTION_DB_ID: ${{ vars.NOTION_DB_ID }}
           NOTION_WATCHLIST_DB_ID: ${{ vars.NOTION_WATCHLIST_DB_ID }}
-        run: python verify_connections.py
+        run: |
+          pip install groq
+          python verify_connections.py
 

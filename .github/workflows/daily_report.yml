@@ -77,7 +77,9 @@ jobs:
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo "action=$action" >> "$GITHUB_OUTPUT"
       - name: 投稿しない接続確認
-        run: python verify_connections.py
+        run: |
+          pip install groq
+          python verify_connections.py
       - name: パッケージインストール
         if: steps.mode.outputs.action == 'post'
         run: pip install yfinance feedparser requests groq beautifulsoup4 playwright jpholiday

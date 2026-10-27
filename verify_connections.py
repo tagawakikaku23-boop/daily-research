@@ -51,16 +51,20 @@ def main():
         load_remote()
         print("PASS: private report memory")
         stage = "Groq model list"
-        models = read_json("https://api.groq.com/openai/v1/models", os.environ["GROQ_API_KEY"])
-        ids = {m["id"] for m in models.get("data", [])}
+        # Use the same official client as report generation.
+        from groq import Groq
+        models = Groq(api_key=os.environ["GROQ_API_KEY"], timeout=30, max_retries=0).models.list()
+        ids = {m.id for m in models.data}
         if not ids.intersection({"openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"}):
             print("No configured Groq model available.")
             return 1
     except urllib.error.HTTPError as exc:
         print(f"Read-only connection check failed at {stage} (HTTP {exc.code}); no response body logged.")
         return 1
-    except Exception:
-        print(f"Read-only connection check failed at {stage}; no exception data logged.")
+    except Exception as exc:
+        status = getattr(exc, "status_code", None)
+        suffix = f" (HTTP {status})" if isinstance(status, int) else ""
+        print(f"Read-only connection check failed at {stage}{suffix}; no exception data logged.")
         return 1
     print("PASS: Notion report schema/query, watchlist, parent page and Groq model availability.")
     print("No Notion pages were created or changed. Newspaper logins and generation are not tested.")
