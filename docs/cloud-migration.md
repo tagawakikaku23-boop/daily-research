@@ -14,8 +14,9 @@
 - 既存の月曜7:30の週次レポートもPC停止後にクラウドへ移行する。
 - GitHub Actionsは開始時刻の保証がなく、混雑時は遅延・実行漏れがあり得る。
   7時・19時は予約時刻であり、Notionへの掲載は収集・生成終了後。
-- 定時投稿はRepository variable `CLOUD_REPORTS_ENABLED=true` のときだけ実行。
-  未設定のままでは投稿しない。旧PCの予約がまだ有効なため、移行時には設定しないこと。
+- 定時投稿は cloud-reporting.json の enabled: true で有効。旧PCの3予約を本人が無効にしたことを2026-10-28に確認した。
+- Repository variable CLOUD_REPORTS_ENABLED=false は緊急停止として優先。未設定なら設定ファイルに従う。
+- 設定ファイルをmainに反映した際、activationの日付が日本時間の当日に一致する場合だけ、指定した朝/夜を検証する。投稿済みの同じ回はスキップする。
 - 同一日の朝/夜/週次は既存Notionページを照会して再投稿を抑止。
   ニュースは朝と夜を分ける。明示的なmanualモードは従来どおり再生成する。
 - Notion照会に失敗したら投稿せず停止。ページ作成POSTは結果不明時に再試行しない。
@@ -47,8 +48,8 @@
 5. Actions → 毎日リサーチ日報 → Run workflow。
    最初はmode=check、action=checkで実行。投稿を伴う検証は、未投稿の回で
    mode=morningまたはevening、action=postを選ぶ。投稿成功とNotion本文を確認する。
-6. Settings → Secrets and variables → Actions → Variables → New repository variable。
-   Name: CLOUD_REPORTS_ENABLED、Value: true を保存。
+6. cloud-reporting.json の enabled を true にする。通常のコード更新では検証投稿は起動しない。
+   activation は切替検証の日付・モードだけを指定する。別日には自動で検証を投稿しない。
 7. 次の朝夜の実行とNotion掲載を確認する。GitHub Actionsの失敗通知も有効にする。
 
 ## 失敗と再実行
@@ -63,7 +64,7 @@
 
 ## 戻す場合
 
-先にCLOUD_REPORTS_ENABLEDをfalseに変更し、GitHub側に実行中の日報がないことを確認。
+先に cloud-reporting.json の enabled を false に変更するか、Repository variable CLOUD_REPORTS_ENABLED を false に変更する。GitHub側に実行中の日報がないことを確認。
 その後、必要であれば旧PC側を有効にする。両方を同時に有効にしない。
 Notionの過去記録や秘密値を削除する必要はない。
 

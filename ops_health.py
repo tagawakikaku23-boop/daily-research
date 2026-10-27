@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import urllib.request
+from report_schedule import load_config, effective_enabled
 
 JST = timezone(timedelta(hours=9))
 WORKFLOWS = ("daily_report.yml", "refresh_watchlist.yml", "monthly_review.yml")
@@ -129,7 +130,7 @@ def main():
     runs = {name: api("https://api.github.com/repos/" + repo + "/actions/workflows/"
                      + name + "/runs?branch=main&per_page=5", token)["workflow_runs"]
             for name in WORKFLOWS}
-    enabled = os.environ.get("CLOUD_REPORTS_ENABLED") == "true"
+    enabled = effective_enabled(load_config(), os.environ.get("CLOUD_REPORTS_ENABLED", ""))
     # Query even while posting is disabled, to test read access without creating a report.
     editions = completed_editions(report_rows(notion, now.strftime("%Y-%m-%d")))
     lines, problems = summarize(runs, enabled, now, editions)
