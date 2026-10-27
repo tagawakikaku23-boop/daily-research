@@ -23,6 +23,7 @@ def main():
         if not os.environ.get(name):
             print(f"Missing required secret: {name}")
             return 1
+    stage = "report database"
     try:
         key = os.environ["NOTION_API_KEY"]
         db = os.environ.get("NOTION_DB_ID") or "37afc83b-0e47-81d4-901d-d20a958122e0"
@@ -34,22 +35,32 @@ def main():
             print("Report database schema mismatch; no changes made.")
             return 1
         # Exercise the same query permission used by deduplication.
+        print("PASS: report database schema")
+        stage = "report database query"
         read_json("https://api.notion.com/v1/databases/" + db + "/query",
                   key, True, {"page_size": 1})
+        print("PASS: report query")
+        stage = "watchlist database"
         read_json("https://api.notion.com/v1/databases/" + watch, key, True)
+        print("PASS: watchlist database")
+        stage = "parent page"
         read_json("https://api.notion.com/v1/pages/" + os.environ["NOTION_PAGE_ID"], key, True)
+        print("PASS: parent page")
+        stage = "private report memory"
         from state_sync import load_remote
         load_remote()
+        print("PASS: private report memory")
+        stage = "Groq model list"
         models = read_json("https://api.groq.com/openai/v1/models", os.environ["GROQ_API_KEY"])
         ids = {m["id"] for m in models.get("data", [])}
         if not ids.intersection({"openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"}):
             print("No configured Groq model available.")
             return 1
     except urllib.error.HTTPError as exc:
-        print(f"Read-only connection check failed (HTTP {exc.code}); no response body logged.")
+        print(f"Read-only connection check failed at {stage} (HTTP {exc.code}); no response body logged.")
         return 1
     except Exception:
-        print("Read-only connection check failed; no exception data logged.")
+        print(f"Read-only connection check failed at {stage}; no exception data logged.")
         return 1
     print("PASS: Notion report schema/query, watchlist, parent page and Groq model availability.")
     print("No Notion pages were created or changed. Newspaper logins and generation are not tested.")
