@@ -1,78 +1,103 @@
 name: 毎日リサーチ日報
 
 on:
-  # 定時実行は Windows タスクスケジューラ（DailyResearch_Morning/Evening/Weekly）へ
-  # 一本化したため、ここの schedule は停止している（2026-08-27）。
-  # 復活させると PC 側と合わせて 1 日 2 本の二重投稿になるので注意。
-  # 手動実行（trigger.html のボタン）は従来どおり使える。mode未指定なら manual
+  schedule:
+    - cron: '0 22 * * *'  # JST 07:00
+    - cron: '0 10 * * *'  # JST 19:00
+    - cron: '30 22 * * 0' # JST Monday 07:30 (existing PC weekly task)
   workflow_dispatch:
     inputs:
       mode:
-        description: '実行モード（morning / evening / manual）'
-        required: false
-        default: 'manual'
+        description: '実行モード（check は投稿しない接続確認）'
+        type: choice
+        options: [check, morning, evening, manual, weekly]
+        default: check
+      action:
+        description: 'post はPC側タスクを無効化してから選ぶ'
+        type: choice
+        options: [check, post]
+        default: check
 
-# スナップショット（前回シグナル・発掘履歴）をリポジトリへ書き戻すための権限
 permissions:
-  contents: write
+  contents: read
 
-# 同時実行を防ぐ（スナップショットのpush競合回避）
 concurrency:
   group: daily-report
   cancel-in-progress: false
 
 jobs:
   run-report:
+    # PC側を停止し、接続確認に成功してから Repository variable を true にする。
+    if: github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && vars.CLOUD_REPORTS_ENABLED == 'true')
     runs-on: ubuntu-latest
-
+    timeout-minutes: 45
+    env:
+      NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      NOTION_PAGE_ID: ${{ secrets.NOTION_PAGE_ID }}
+      # IDs retain the existing application defaults when no override exists.
+      NOTION_DB_ID: ${{ vars.NOTION_DB_ID || '37afc83b-0e47-81d4-901d-d20a958122e0' }}
+      NOTION_WATCHLIST_DB_ID: ${{ vars.NOTION_WATCHLIST_DB_ID || '3555cab9-4828-4185-86eb-5a0614b8c0ea' }}
     steps:
-      - name: リポジトリを取得
-        uses: actions/checkout@v4
-
-      - name: Python セットアップ
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: パッケージインストール
-        run: pip install yfinance feedparser requests groq beautifulsoup4 playwright jpholiday
-
-      - name: Playwright Chromiumインストール
-        run: playwright install chromium --with-deps
-
-      - name: 実行モード決定（朝/夜/手動）
+      - name: 回帰テスト
+        run: python -m unittest discover -s tests -v
+      - name: 実行モードを検証
         id: mode
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "mode=${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event.schedule }}" = "15 21 * * *" ]; then
-            echo "mode=morning" >> "$GITHUB_OUTPUT"
-          else
-            echo "mode=evening" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: 日報実行（${{ steps.mode.outputs.mode }}）
         env:
-          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          NOTION_PAGE_ID: ${{ secrets.NOTION_PAGE_ID }}
+          EVENT: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          INPUT_MODE: ${{ inputs.mode }}
+          INPUT_ACTION: ${{ inputs.action }}
+        run: |
+          if [ "$EVENT" = schedule ]; then
+            case "$SCHEDULE" in
+              "0 22 * * *") mode=morning ;;
+              "0 10 * * *") mode=evening ;;
+              "30 22 * * 0") mode=weekly ;;
+              *) exit 1 ;;
+            esac
+            action=post
+          else
+            mode="$INPUT_MODE"
+            action="$INPUT_ACTION"
+          fi
+          case "$mode" in check|morning|evening|manual|weekly) ;; *) exit 1 ;; esac
+          case "$action" in check|post) ;; *) exit 1 ;; esac
+          if [ "$action" = post ] && [ "${{ github.ref }}" != refs/heads/main ]; then
+            echo "Publication is restricted to main."
+            exit 1
+          fi
+          if [ "$mode" = check ]; then action=check; fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "action=$action" >> "$GITHUB_OUTPUT"
+      - name: 投稿しない接続確認
+        run: python verify_connections.py
+      - name: パッケージインストール
+        if: steps.mode.outputs.action == 'post'
+        run: pip install yfinance feedparser requests groq beautifulsoup4 playwright jpholiday
+      - name: Chromiumインストール
+        if: steps.mode.outputs.action == 'post'
+        run: playwright install chromium --with-deps
+      - name: Notionから前回データを取得
+        if: steps.mode.outputs.action == 'post'
+        id: state
+        run: python state_sync.py pull
+      - name: 日報投稿
+        if: steps.mode.outputs.action == 'post'
+        env:
+          REPORT_MODE: ${{ steps.mode.outputs.mode }}
           NIKKEI_EMAIL: ${{ secrets.NIKKEI_EMAIL }}
           NIKKEI_PASSWORD: ${{ secrets.NIKKEI_PASSWORD }}
           NIIGATA_NIPPO_EMAIL: ${{ secrets.NIIGATA_NIPPO_EMAIL }}
           NIIGATA_NIPPO_PASSWORD: ${{ secrets.NIIGATA_NIPPO_PASSWORD }}
-        run: python daily_report.py ${{ steps.mode.outputs.mode }}
+        run: python run_private.py daily_report.py "$REPORT_MODE"
+      - name: 前回データをNotionだけに保存
+        if: always() && steps.state.outcome == 'success'
+        run: python state_sync.py push
 
-      # 「前回からの変化」用の記憶ファイルを次回実行に引き継ぐ
-      # （このワークフローはschedule/dispatch起動のみなので、pushによる再帰起動はない）
-      - name: スナップショットを保存
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add last_snapshot.json last_discovery.json || true
-          if git diff --cached --quiet; then
-            echo "スナップショット変更なし"
-          else
-            git commit -m "chore: レポート記憶ファイルを更新 [auto]"
-            git pull --rebase origin main || true
-            git push
-          fi
