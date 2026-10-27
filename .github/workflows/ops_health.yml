@@ -1,0 +1,34 @@
+name: 自動処理の稼働点検
+on:
+  schedule:
+    - cron: '20 13 * * *' # JST 22:20; allow time for the evening delivery
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'ops_health.py'
+      - '.github/workflows/ops_health.yml'
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: ops-health
+  cancel-in-progress: false
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 点検ロジックをテスト
+        run: python -m unittest discover -s tests -v
+      - name: 稼働点検を保存（レポート本文は変更しない）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          CLOUD_REPORTS_ENABLED: ${{ vars.CLOUD_REPORTS_ENABLED }}
+        run: python ops_health.py --save
+
