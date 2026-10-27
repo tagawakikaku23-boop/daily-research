@@ -1,0 +1,61 @@
+"""Read-only verification using GitHub secrets. Never print keys, URLs or API bodies."""
+import json
+import os
+import sys
+import urllib.request
+import urllib.error
+
+
+def read_json(url, key, notion=False, body=None):
+    headers = {"Authorization": "Bearer " + key}
+    if notion:
+        headers["Notion-Version"] = "2022-06-28"
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, headers=headers,
+                                 data=None if body is None else json.dumps(body).encode())
+    with urllib.request.urlopen(req, timeout=30) as response:
+        return json.load(response)
+
+
+def main():
+    for name in ("NOTION_API_KEY", "NOTION_PAGE_ID", "GROQ_API_KEY"):
+        if not os.environ.get(name):
+            print(f"Missing required secret: {name}")
+            return 1
+    try:
+        key = os.environ["NOTION_API_KEY"]
+        db = os.environ.get("NOTION_DB_ID") or "37afc83b-0e47-81d4-901d-d20a958122e0"
+        watch = os.environ.get("NOTION_WATCHLIST_DB_ID") or "3555cab9-4828-4185-86eb-5a0614b8c0ea"
+        report = read_json("https://api.notion.com/v1/databases/" + db, key, True)
+        expected = {"名前": "title", "日付": "date", "種類": "select"}
+        if any(report.get("properties", {}).get(k, {}).get("type") != v
+               for k, v in expected.items()):
+            print("Report database schema mismatch; no changes made.")
+            return 1
+        # Exercise the same query permission used by deduplication.
+        read_json("https://api.notion.com/v1/databases/" + db + "/query",
+                  key, True, {"page_size": 1})
+        read_json("https://api.notion.com/v1/databases/" + watch, key, True)
+        read_json("https://api.notion.com/v1/pages/" + os.environ["NOTION_PAGE_ID"], key, True)
+        from state_sync import load_remote
+        load_remote()
+        models = read_json("https://api.groq.com/openai/v1/models", os.environ["GROQ_API_KEY"])
+        ids = {m["id"] for m in models.get("data", [])}
+        if not ids.intersection({"openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"}):
+            print("No configured Groq model available.")
+            return 1
+    except urllib.error.HTTPError as exc:
+        print(f"Read-only connection check failed (HTTP {exc.code}); no response body logged.")
+        return 1
+    except Exception:
+        print("Read-only connection check failed; no exception data logged.")
+        return 1
+    print("PASS: Notion report schema/query, watchlist, parent page and Groq model availability.")
+    print("No Notion pages were created or changed. Newspaper logins and generation are not tested.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+

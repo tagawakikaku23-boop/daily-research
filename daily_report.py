@@ -12,6 +12,8 @@ import feedparser
 from groq import Groq
 from datetime import datetime, timezone, timedelta
 import time
+import math
+from report_delivery import find_existing, publish
 import os
 from pathlib import Path
 
@@ -29,7 +31,7 @@ PARENT_PAGE_ID = os.environ["NOTION_PAGE_ID"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 # レポート格納先データベース（第3-4弾④：氾濫対策）。未設定なら従来どおりページ直下に作成
 NOTION_DB_ID = os.environ.get("NOTION_DB_ID", "37afc83b-0e47-81d4-901d-d20a958122e0")
-# 監視銘柄DB（Notionでワンタッチ追加）。未設定/失敗時は watchlist.csv にフォールバック
+# 保有・監視銘柄はNotionのみに保存。読込失敗時は停止する。
 NOTION_WATCHLIST_DB_ID = os.environ.get("NOTION_WATCHLIST_DB_ID", "3555cab9-4828-4185-86eb-5a0614b8c0ea")
 
 # ── AI出力の文字化けガード ─────────────────────────
@@ -102,58 +104,9 @@ INDICES = [
     ("^IXIC",  "NASDAQ"),
 ]
 
-# 保有個別株 (ticker, 銘柄名, 保有株数, 平均取得単価)
-# ↓ watchlist.csv が存在すればそちらを正とし、無ければこの既定値を使う
-_DEFAULT_HOLDINGS = [
-    ("8591.T", "オリックス",       5,   1442),
-    ("9434.T", "ソフトバンク",    10,    130),
-    ("8411.T", "みずほFG",         5,   1360),
-    ("2914.T", "JT",               1,   2139),
-    ("8002.T", "丸紅",             3,    740),
-    ("8001.T", "伊藤忠商事",       5,    651),
-    ("9904.T", "ベリテ",          10,    394),
-    ("3315.T", "日本コークス",    50,    110),
-    ("8173.T", "Joshin",           3,   2270),
-    ("4502.T", "武田薬品",        18,   3471),
-    ("1835.T", "東鉄工業",        12,   2243),
-    ("8697.T", "JPX",            200,    936),
-    ("6301.T", "コマツ",          15,   2916),
-    ("9432.T", "NTT",            225,    158),
-    ("VOO",    "VOO(S&P500ETF)",   1, 56141),  # 355USD×158円
-    ("SPYD",   "SPYD(高配当ETF)",  5,  6361),  # 40.26USD×158円
-]
+# 個人の保有・候補・監視データはNotionのみで管理する。
 
-# 新規購入検討銘柄
-_DEFAULT_WATCHLIST = [
-    ("4246.T", "ダイキョーニシカワ"),
-    ("8892.T", "エスコン"),
-    ("8923.T", "トーセイ"),
-    ("9252.T", "ラストワンマイル"),
-    ("8061.T", "西華産業"),
-    ("8316.T", "三井住友FG"),
-    ("9503.T", "関西電力"),
-    ("1489.T", "日経高配当50ETF"),
-]
-
-# 監視中銘柄
-_DEFAULT_MONITOR = [
-    ("1605.T", "INPEX"),
-    ("3003.T", "ヒューリック"),
-    ("3543.T", "コメダHD"),
-    ("4063.T", "信越化学工業"),
-    ("4452.T", "花王 ★34年連続増配"),
-    ("8031.T", "三井物産"),
-    ("8058.T", "三菱商事"),
-    ("8306.T", "三菱UFJFG"),
-    ("8766.T", "東京海上HD"),
-    ("8593.T", "三菱HCキャピタル ★連続増配"),
-    ("9433.T", "KDDI ★23年連続増配"),
-    ("9436.T", "沖縄セルラー電話 ★連続増配"),
-    ("7466.T", "SPK ★連続増配"),
-]
-
-# ── 監視リスト（watchlist.csv）読み込み（第4弾①）─────────
-WATCHLIST_FILE = Path(__file__).parent / "watchlist.csv"
+# ── Notion監視リスト読み込み ─────────────────────────
 
 def _wl_text(prop):
     """Notionプロパティ（title/rich_text）からプレーン文字列を取り出す"""
@@ -166,7 +119,7 @@ def _wl_text(prop):
 WATCHLIST_PAGE_IDS = {}
 
 def load_watchlist_from_notion():
-    """Notionの監視銘柄DBを読む。失敗時は None を返す（CSVへフォールバック）"""
+    """Notionの監視銘柄DBを読む。失敗時は None を返す。"""
     if not NOTION_WATCHLIST_DB_ID:
         return None
     try:
@@ -208,44 +161,15 @@ def load_watchlist_from_notion():
             return holdings, watch, monitor
         return None
     except Exception as e:
-        print(f"  ⚠️ Notion監視DB読込失敗、CSV/既定にフォールバック: {e}")
+        print(f"  ⚠️ Notion監視DB読込失敗（個人データを含む詳細は非表示）")
         return None
 
 def load_watchlist():
-    """監視銘柄を Notion DB → watchlist.csv → 既定リスト の順で読み込む。
-    (holdings, watchlist, monitor) を返す。"""
+    """Notionを唯一の入力とし、接続失敗や空データでは配信を停止する。"""
     via_notion = load_watchlist_from_notion()
-    if via_notion:
-        return via_notion
-    if not WATCHLIST_FILE.exists():
-        return _DEFAULT_HOLDINGS, _DEFAULT_WATCHLIST, _DEFAULT_MONITOR
-    holdings, watch, monitor = [], [], []
-    try:
-        for raw in WATCHLIST_FILE.read_text(encoding="utf-8-sig").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            cols = [c.strip() for c in line.split(",")]
-            if len(cols) < 3:
-                continue
-            code, name, kind = cols[0], cols[1], cols[2]
-            if kind == "保有":
-                try:
-                    shares = int(float(cols[3])) if len(cols) > 3 and cols[3] else 0
-                    cost   = float(cols[4]) if len(cols) > 4 and cols[4] else 0
-                except ValueError:
-                    shares, cost = 0, 0
-                holdings.append((code, name, shares, cost))
-            elif kind == "候補":
-                watch.append((code, name))
-            else:  # 監視 など
-                monitor.append((code, name))
-        if not (holdings or watch or monitor):
-            return _DEFAULT_HOLDINGS, _DEFAULT_WATCHLIST, _DEFAULT_MONITOR
-        return holdings, watch, monitor
-    except Exception as e:
-        print(f"  ⚠️ watchlist.csv 読み込み失敗、既定リストを使用: {e}")
-        return _DEFAULT_HOLDINGS, _DEFAULT_WATCHLIST, _DEFAULT_MONITOR
+    if via_notion is None:
+        raise RuntimeError("Notion監視銘柄リストを読み込めないため配信を停止しました")
+    return via_notion
 
 HOLDINGS, WATCHLIST, MONITOR = load_watchlist()
 
@@ -306,9 +230,15 @@ def get_stock_data(ticker):
         if len(hist) < 1:
             return None
 
-        closes  = hist["Close"]
-        price   = closes.iloc[-1]
+        closes  = hist["Close"].dropna()
+        if len(closes) == 0:
+            return {"error": "有効な終値なし"}
+        price   = float(closes.iloc[-1])
+        if not math.isfinite(price) or price <= 0:
+            return {"error": "終値が不正"}
         prev    = closes.iloc[-2] if len(closes) >= 2 else price
+        if not math.isfinite(prev) or prev <= 0:
+            prev = price
         chg_pct = (price - prev) / prev * 100
 
         # 週間騰落率（直近5営業日前との比較）
@@ -324,8 +254,12 @@ def get_stock_data(ticker):
         except Exception:
             asof = ""
 
-        low52   = info.get("fiftyTwoWeekLow", price)
-        high52  = info.get("fiftyTwoWeekHigh", price)
+        low52   = info.get("fiftyTwoWeekLow")
+        high52  = info.get("fiftyTwoWeekHigh")
+        if not isinstance(low52, (int, float)) or not math.isfinite(low52) or low52 <= 0:
+            low52 = price
+        if not isinstance(high52, (int, float)) or not math.isfinite(high52) or high52 <= 0:
+            high52 = price
         div_yield = info.get("dividendYield") or 0
         per     = info.get("trailingPE")
         pbr     = info.get("priceToBook")
@@ -1435,6 +1369,12 @@ def signal_color(signal):
 # アイコン→「種類」セレクト値の対応（DB分類用）
 _ICON_KIND = {"🌅": "🌅 朝", "🌙": "🌙 夜", "🔄": "🔄 手動", "📰": "📰 ニュース", "📊": "📊 月次", "🛒": "🛒 週次"}
 
+def existing_report(title, icon):
+    headers = {"Authorization": f"Bearer {NOTION_API_KEY}",
+               "Content-Type": "application/json", "Notion-Version": "2022-06-28"}
+    return find_existing(requests, headers, NOTION_DB_ID, PARENT_PAGE_ID,
+                         title, icon, _ICON_KIND)
+
 def create_page(title, blocks, icon="📋"):
     headers = {
         "Authorization": f"Bearer {NOTION_API_KEY}",
@@ -1463,28 +1403,11 @@ def create_page(title, blocks, icon="📋"):
             "properties": {"title":{"title":[{"text":{"content":title}}]}},
             "children": blocks[:100],
         }
-    # Notion側の一時エラー（5xx/429/瞬断）に備えてリトライ
-    resp = None
-    for attempt in range(3):
-        try:
-            resp = requests.post("https://api.notion.com/v1/pages",
-                                 headers=headers, json=data, timeout=60)
-            if resp.status_code in (429, 500, 502, 503, 504):
-                raise requests.HTTPError(f"status {resp.status_code}")
-            resp.raise_for_status()
-            break
-        except Exception as e:
-            if attempt < 2:
-                print(f"  Notionページ作成リトライ({attempt+1}/3): {e}")
-                time.sleep(10 * (attempt + 1))
-                continue
-            raise
-    pid = resp.json()["id"]
-    if len(blocks) > 100:
-        for i in range(100, len(blocks), 100):
-            requests.patch(f"https://api.notion.com/v1/blocks/{pid}/children",
-                           headers=headers, json={"children": blocks[i:i+100]})
-    return resp.json().get("url", "")
+    existing = existing_report(title, icon)
+    if existing:
+        print("  投稿済みのためスキップ")
+        return existing
+    return publish(requests, headers, data, blocks)
 
 # ── 夜の「明日の注目＋ひとことメモ」AI生成 ─────────────
 def generate_evening_memo(macro_text, movers_text, today_str=""):
@@ -1820,6 +1743,10 @@ def build_weekend_section(status, snap, date_str):
 
 # ── 朝レポート（07:00）────────────────────────────
 def create_morning_page(date_str, now_str, title, icon):
+    existing = existing_report(title, icon)
+    if existing:
+        print("  投稿済みのためスキップ")
+        return existing
     print("\n==== 🌅 朝レポート作成中 ====")
     usdjpy = get_usdjpy_rate() or 1
     snap   = get_macro_snapshot()
@@ -1922,7 +1849,7 @@ def create_morning_page(date_str, now_str, title, icon):
     advice = generate_advice("\n".join(data["portfolio_lines"][:40]),
                              "\n".join(data["news_lines"][:20]) or "ニュースなし")
     blocks.append(h2("⑥ 今日の買い増し助言・新規注目"))
-    blocks.append(callout_rt([rt("予算目安: 1回10〜30万円・分割で。NISA成長枠が残れば高配当はNISA優先")], "💴", "blue_background"))
+    blocks.append(callout_rt([rt("買付額はご自身の予算に合わせて分割で。NISAの利用可否も確認")], "💴", "blue_background"))
     blocks.extend(long_callout(advice, "💡", "yellow_background"))
     blocks.append(divider())
 
@@ -1969,14 +1896,17 @@ def create_morning_page(date_str, now_str, title, icon):
     blocks.append(freshness_note())
 
     # 差分用スナップショット保存
-    save_snapshot({"signals": data["signals"], "asof": now_str})
-
     url = create_page(title, blocks, icon)
+    save_snapshot({"signals": data["signals"], "asof": now_str})
     print(f"朝レポート完了: {url}")
     return url
 
 # ── 夜レポート（19:00）────────────────────────────
 def create_evening_page(date_str, now_str, title, icon):
+    existing = existing_report(title, icon)
+    if existing:
+        print("  投稿済みのためスキップ")
+        return existing
     print("\n==== 🌙 夜レポート作成中 ====")
     usdjpy = get_usdjpy_rate() or 1
     snap   = get_macro_snapshot()
@@ -2104,6 +2034,11 @@ def create_evening_page(date_str, now_str, title, icon):
 
 # ── ニュースページ ────────────────────────────────
 def create_news_page(date_str, time_str=""):
+    title = f"{date_str} {time_str} ニュースダイジェスト".replace("  ", " ").strip()
+    existing = existing_report(title, "📰")
+    if existing:
+        print("  投稿済みのためスキップ")
+        return existing
     print("\n==== ニュースダイジェスト作成中 ====")
     blocks       = []
     all_news_for_digest = []
@@ -2228,6 +2163,10 @@ def generate_weekly_comment(picks_text, cautions_text, today_str):
         return ""
 
 def create_weekly_page(date_str, now_str, title, icon="🛒"):
+    existing = existing_report(title, icon)
+    if existing:
+        print("  投稿済みのためスキップ")
+        return existing
     print("\n==== 🛒 今週の買い場チェック作成中 ====")
     JST    = timezone(timedelta(hours=9))
     now    = datetime.now(JST)
@@ -2434,18 +2373,16 @@ def main():
     elif mode == "morning":
         title = f"{date_str} {time_str} 朝の株レポート"
         stock_url = create_morning_page(date_str, now_str, title, "🌅")
-        print(f"\n=== 朝の完了 ===\n株式 : {stock_url}")
+        news_url = create_news_page(date_str, time_str)
+        print(f"\n=== 朝の完了 ===\n株式 : {stock_url}\nニュース : {news_url}")
     else:
         title = f"{date_str} {time_str} 夜の株レポート"
         stock_url = create_evening_page(date_str, now_str, title, "🌙")
-        # 夜は振り返り回。ニュースダイジェストも夜に付ける
-        # （ニュース側が失敗しても株レポートは完了扱いにする＝全滅防止）
-        try:
-            news_url = create_news_page(date_str, time_str)
-        except Exception as e:
-            news_url = f"生成失敗: {e}"
-            print(f"  ⚠️ ニュースダイジェスト生成失敗（株レポートは完了済み）: {e}")
+        # 株式が投稿済みでも、未完了のニュースだけを再実行できる。
+        news_url = create_news_page(date_str, time_str)
         print(f"\n=== 夜の完了 ===\n株式 : {stock_url}\nニュース : {news_url}")
 
 if __name__ == "__main__":
     main()
+
+

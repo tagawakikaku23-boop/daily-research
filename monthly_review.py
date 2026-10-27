@@ -75,6 +75,8 @@ def simulate_fv(principal, monthly, years, annual_rate):
     """毎月積立の複利シミュレーション（想定利回りベースの試算）"""
     r = annual_rate / 12
     n = years * 12
+    if r == 0:
+        return principal + monthly * n
     return principal * (1 + r) ** n + monthly * (((1 + r) ** n - 1) / r)
 
 
@@ -110,7 +112,7 @@ def generate_review_comment(facts, today_str):
         from groq import Groq
         client = Groq(api_key=m.GROQ_API_KEY)
         prompt = f"""あなたは長期・分散・低コストを重んじる投資アドバイザーです（山崎元・両学長の思想に近い立場）。本日は {today_str}。
-ユーザーの方針: ①インデックス積立（S&P500中心・月4万円）②日本の高配当・連続増配株、の2本柱。短期売買はしない。
+ユーザーの方針: ①インデックス積立（インデックス中心）②日本の高配当・連続増配株、の2本柱。短期売買はしない。
 
 【今月の資産スナップショット（推定含む・信頼できる値）】
 {facts}
@@ -252,7 +254,7 @@ def main():
              f"投資信託¥{funds:,.0f}({funds/total*100:.1f}%) 年金¥{pension:,.0f}({pension/total*100:.1f}%) "
              f"ポイント¥{points:,.0f}\nリスク資産比率: {risk_ratio:.1f}%\n"
              + (growth_facts + "\n" if growth_facts else "")
-             + f"毎月の積立: ¥{tsumitate_total:,.0f}（S&P500中心・自動反映済み）。iDeCoは免除期間中で停止。")
+             + f"毎月の積立: ¥{tsumitate_total:,.0f}（S&P500中心・自動反映済み）。年金の積立設定もマスタに従う。")
     print("  AI助言生成中...")
     comment = generate_review_comment(facts, date_str)
 
@@ -290,12 +292,12 @@ def main():
                           m.cell(f"{pct:+.1f}%", color, bold=True)])
         blocks.append(m.table(["時点", "当時の総資産", "増減", "増減率"], grows))
         blocks.append(m.callout_rt(
-            [m.rt("記録開始(2025-02)はマネフォ連携を始めた月。それ以前からの積立分を含むため、"
-                  "開始時点ですでに約745万円からのスタートです。")], "📌", "gray_background"))
+            [m.rt("記録開始時点の残高は既存の資産推移データに基づきます。"
+                  "開始以前の資産形成も含まれます。")], "📌", "gray_background"))
 
     # 🔮 長期シミュレーション（想定利回りベースの試算・予測ではない）
     principal = total - cash - points
-    monthly = tsumitate_total if tsumitate_total > 0 else 40000
+    monthly = tsumitate_total
     blocks.append(m.h2("🔮 長期シミュレーション"))
     blocks.append(m.callout_rt(
         [m.rt(f"今のリスク資産 ¥{principal:,.0f} ＋ 毎月¥{monthly:,.0f}の積立を続けた場合の試算。"
@@ -331,3 +333,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

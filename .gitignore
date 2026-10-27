@@ -6,3 +6,7 @@ run_evening.bat
 run_weekly.bat
 __pycache__/
 *.pyc
+watchlist.csv
+last_snapshot.json
+last_discovery.json
+report-run.log

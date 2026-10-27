@@ -1,0 +1,40 @@
+name: Report migration validation
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths:
+      - '*.py'
+      - 'tests/**'
+      - '.github/workflows/daily_report.yml'
+      - '.github/workflows/validate_report.yml'
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m unittest discover -s tests -v
+      - run: python -m py_compile daily_report.py report_delivery.py verify_connections.py state_sync.py run_private.py
+  connections:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Read-only check; no report publication
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_PAGE_ID: ${{ secrets.NOTION_PAGE_ID }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          NOTION_DB_ID: ${{ vars.NOTION_DB_ID }}
+          NOTION_WATCHLIST_DB_ID: ${{ vars.NOTION_WATCHLIST_DB_ID }}
+        run: python verify_connections.py
+
