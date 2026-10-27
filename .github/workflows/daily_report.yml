@@ -5,6 +5,9 @@ on:
     - cron: '0 22 * * *'  # JST 07:00
     - cron: '0 10 * * *'  # JST 19:00
     - cron: '30 22 * * 0' # JST Monday 07:30 (existing PC weekly task)
+  push:
+    branches: [main]
+    paths: ['cloud-reporting.json']
   workflow_dispatch:
     inputs:
       mode:
@@ -27,8 +30,8 @@ concurrency:
 
 jobs:
   run-report:
-    # PC側を停止し、接続確認に成功してから Repository variable を true にする。
-    if: github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && vars.CLOUD_REPORTS_ENABLED == 'true')
+    # 旧PC停止確認済み。配信設定と緊急停止は共通ルーターで判定する。
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -54,28 +57,8 @@ jobs:
           SCHEDULE: ${{ github.event.schedule }}
           INPUT_MODE: ${{ inputs.mode }}
           INPUT_ACTION: ${{ inputs.action }}
-        run: |
-          if [ "$EVENT" = schedule ]; then
-            case "$SCHEDULE" in
-              "0 22 * * *") mode=morning ;;
-              "0 10 * * *") mode=evening ;;
-              "30 22 * * 0") mode=weekly ;;
-              *) exit 1 ;;
-            esac
-            action=post
-          else
-            mode="$INPUT_MODE"
-            action="$INPUT_ACTION"
-          fi
-          case "$mode" in check|morning|evening|manual|weekly) ;; *) exit 1 ;; esac
-          case "$action" in check|post) ;; *) exit 1 ;; esac
-          if [ "$action" = post ] && [ "${{ github.ref }}" != refs/heads/main ]; then
-            echo "Publication is restricted to main."
-            exit 1
-          fi
-          if [ "$mode" = check ]; then action=check; fi
-          echo "mode=$mode" >> "$GITHUB_OUTPUT"
-          echo "action=$action" >> "$GITHUB_OUTPUT"
+          CLOUD_REPORTS_ENABLED: ${{ vars.CLOUD_REPORTS_ENABLED }}
+        run: python report_schedule.py
       - name: 投稿しない接続確認
         run: |
           pip install groq
