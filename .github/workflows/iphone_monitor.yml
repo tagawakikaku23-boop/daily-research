@@ -63,6 +63,7 @@ jobs:
           elif [ "$EVENT" = "push" ]; then
             # Explicit one-time validation commit; ordinary branch pushes stay read-only.
             if [ "$VALIDATE_ON_PUSH" = "true" ]; then
+              slot="validation-40790570788" # Reconcile the same approved test, including partial saves.
               save_args=(--save --verify-rerun)
             fi
           elif [ "$SAVE_REQUESTED" = "true" ]; then

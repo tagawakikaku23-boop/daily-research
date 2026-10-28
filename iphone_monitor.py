@@ -435,7 +435,14 @@ def main():
             observation['save_result'] = 'failed'
             observation['save_error_type'] = type(exc).__name__
             status = getattr(getattr(exc, 'response', None), 'status_code', None)
-            raise SystemExit(f'Notion save failed: {type(exc).__name__}; HTTP={status}; see private destination') from None
+            reason = 'validation_or_transport_failure'
+            if isinstance(exc, ValueError) and str(exc).startswith((
+                    'Notion schema mismatch:', 'Notion select options require review:',
+                    'Notion read-back mismatch:', 'snapshot receipt read-back mismatch',
+                    'snapshot body missing or ambiguous', 'unexpected snapshot schema',
+                    'existing record mismatch', 'duplicate records require review')):
+                reason = str(exc)  # Fixed checks/property labels only; no response bodies or record values.
+            raise SystemExit(f'Notion save failed: {type(exc).__name__}; HTTP={status}; check={reason}') from None
         finally:
             # Public artifact contains only public-source prices and generic status, never Notion IDs/responses.
             Path(args.output).write_text(json.dumps(observation, ensure_ascii=False, indent=2), encoding='utf-8')
