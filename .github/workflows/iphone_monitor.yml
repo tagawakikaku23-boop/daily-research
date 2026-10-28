@@ -43,6 +43,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           CRON: ${{ github.event.schedule }}
           SAVE_REQUESTED: ${{ inputs.save }}
+          VALIDATE_ON_PUSH: ${{ contains(github.event.head_commit.message, '[verify-iphone-save]') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -60,8 +61,10 @@ jobs:
             fi
             save_args=(--save)
           elif [ "$EVENT" = "push" ]; then
-            # Subsequent branch pushes stay read-only while destination access is pending.
-            save_args=()
+            # Explicit one-time validation commit; ordinary branch pushes stay read-only.
+            if [ "$VALIDATE_ON_PUSH" = "true" ]; then
+              save_args=(--save --verify-rerun)
+            fi
           elif [ "$SAVE_REQUESTED" = "true" ]; then
             save_args=(--save --verify-rerun)
           fi
