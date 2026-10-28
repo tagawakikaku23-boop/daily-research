@@ -116,6 +116,11 @@ class SaveSafeguards(unittest.TestCase):
 
 
 class ReceiptTests(unittest.TestCase):
+    def test_notion_date_precision_preserves_exact_snapshot_time(self):
+        row = observation_rows({}, {}, '2026-10-29T08:57:48+09:00', None, [])[0]
+        self.assertEqual(properties(row, 'test')['確認日時']['date']['start'], '2026-10-29T08:57:00+09:00')
+        self.assertEqual(snapshot(row, 'test')['observed_at'], '2026-10-29T08:57:48+09:00')
+
     def test_previous_lookup_separates_official_variant_and_earlier_time(self):
         n = Notion('test', session=object())
         row = observation_rows({}, {}, '2026-10-29T08:00:00+09:00', None, [])[0]

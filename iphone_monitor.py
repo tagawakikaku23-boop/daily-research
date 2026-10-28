@@ -245,7 +245,9 @@ def properties(row, title):
     note = (f"公式トップ『買取強化』基準額={row['base_price']}円。掲載更新日={row['publication_date']}。"
             f"{row['condition']}。取得エラー={','.join(row['errors']) or 'なし'}。"
             '送料・減額・諸費用未確定につき純利益空欄。掲載額は査定確約ではない。購入・買取申込なし。')
-    props = {'記録名': {'title': rich(title)}, '確認日時': {'date': {'start': row['observed_at']}},
+    # Notion date properties use minute precision. Keep exact seconds in the JSON snapshot.
+    property_time = datetime.fromisoformat(row['observed_at'].replace('Z', '+00:00')).replace(second=0, microsecond=0).isoformat()
+    props = {'記録名': {'title': rich(title)}, '確認日時': {'date': {'start': property_time}},
              'モデル': {'select': {'name': row['model'] if row['model'] in TARGETS else 'その他'}},
              '容量': {'select': {'name': row['capacity']}}, 'カラー': {'rich_text': rich(row['color'])},
              '買取先': {'select': {'name': 'モバイルミックス'}}, 'データ品質': {'select': {'name': row['quality']}},
