@@ -15,9 +15,19 @@ JST = timezone(timedelta(hours=9))
 MIX = 'https://mobile-mix.jp/'
 DS = '25643f3c-6b80-4eb7-856f-cc8e25c136ac'
 APPLE = 'https://www.apple.com/jp/shop/buy-iphone/'
-TARGETS = {'iPhone Duo': ('iphone-duo', ['256GB', '512GB', '1TB', '2TB']),
-           'iPhone 18 Pro Max': ('iphone-18-pro', ['256GB', '512GB', '1TB', '2TB']),
-           'iPhone 18 Pro': ('iphone-18-pro', ['256GB', '512GB', '1TB'])}
+def load_targets():
+    config = json.loads(Path(__file__).with_name('iphone-monitor-targets.json').read_text(encoding='utf-8'))
+    result = {}
+    for model, item in config.items():
+        if not model.startswith('iPhone ') or not re.fullmatch(r'iphone-[a-z0-9-]+', item['apple_slug']):
+            raise ValueError('invalid official target configuration')
+        if not item['capacities'] or not set(item['capacities']).issubset({'128GB', '256GB', '512GB', '1TB', '2TB'}):
+            raise ValueError('new capacities require schema review')
+        result[model] = (item['apple_slug'], item['capacities'])
+    return result
+
+
+TARGETS = load_targets()
 
 
 def soup(html):
@@ -209,7 +219,10 @@ def collect(channel=None):
             featured = {}
             terms_hash = None
             errors.append('MobileMix:' + (str(exc) if isinstance(exc, ValueError) else type(exc).__name__))
-        for slug in sorted({TARGETS[m][0] for m, _ in featured if m in TARGETS}):
+        priority = sorted({TARGETS[m][0] for m, _ in featured if m in TARGETS})
+        remaining = sorted({slug for slug, _ in TARGETS.values()} - set(priority))
+        # Featured products first; keep configured variants visible when a feature disappears.
+        for slug in priority + remaining:
             try:
                 url = APPLE + slug
                 check_robots(context, url)
@@ -227,6 +240,8 @@ def rich(text):
 
 
 def properties(row, title):
+    if row['capacity'] not in ('128GB', '256GB', '512GB', '1TB', '2TB'):
+        raise ValueError('new capacity requires schema review')
     note = (f"公式トップ『買取強化』基準額={row['base_price']}円。掲載更新日={row['publication_date']}。"
             f"{row['condition']}。取得エラー={','.join(row['errors']) or 'なし'}。"
             '送料・減額・諸費用未確定につき純利益空欄。掲載額は査定確約ではない。購入・買取申込なし。')
@@ -256,6 +271,26 @@ def value(prop):
     return v
 
 
+def snapshot(row, slot, previous=None):
+    previous = previous or {}
+    return {'schema_version': 1, 'record_kind': 'iphone_price_observation',
+            'record_key': f"MM公式|{slot}|{row['model']} {row['capacity']}|{row['color']}",
+            'slot': slot, 'observed_at': row['observed_at'], 'source_kind': 'official',
+            'sources': {'buyback': row['source'], 'apple': row['apple_url'],
+                        'buyback_publication_date': row['publication_date']},
+            'price_change': {'previous_observed_at': previous.get('observed_at'),
+                             'previous_buy_price': previous.get('buy_price'),
+                             'buy_price_delta': row['buy_price'] - previous['buy_price']
+                             if row['buy_price'] is not None and previous.get('buy_price') is not None else None,
+                             'comparison_rule': 'same official source, model, capacity, color; latest successful earlier record'},
+            'save_result': 'pending_readback', 'row': row}
+
+
+def code_block(data):
+    return {'object': 'block', 'type': 'code', 'code': {'language': 'json',
+            'rich_text': rich(json.dumps(data, ensure_ascii=False, separators=(',', ':')))}}
+
+
 class Notion:
     def __init__(self, token, session=None):
         if session is None:
@@ -279,6 +314,62 @@ class Notion:
                               ('推定純利益', 'number'), ('送料など', 'number'), ('備考', 'rich_text')]:
             if schema.get(key, {}).get('type') != expected:
                 raise ValueError('Notion schema mismatch: ' + key)
+        choices = {'モデル': list(TARGETS) + ['その他'],
+                   '容量': ['128GB', '256GB', '512GB', '1TB', '2TB'],
+                   '買取先': ['モバイルミックス'],
+                   'データ品質': ['公式確認済', '取得失敗'], '判定': ['公式要確認']}
+        for key, names in choices.items():
+            prop = schema.get(key, {})
+            existing = {o['name'] for o in prop.get('select', {}).get('options', [])}
+            if prop.get('type') != 'select' or not set(names).issubset(existing):
+                raise ValueError('Notion select options require review: ' + key)
+
+    def previous(self, row):
+        result = self.call('POST', 'data_sources/' + DS + '/query', {
+            'page_size': 1, 'sorts': [{'property': '確認日時', 'direction': 'descending'}],
+            'filter': {'and': [
+                {'property': '記録名', 'title': {'starts_with': 'MM公式|'}},
+                {'property': '価格出典', 'url': {'equals': MIX}},
+                {'property': 'モデル', 'select': {'equals': row['model'] if row['model'] in TARGETS else 'その他'}},
+                {'property': '容量', 'select': {'equals': row['capacity']}},
+                {'property': 'カラー', 'rich_text': {'equals': row['color']}},
+                {'property': 'データ品質', 'select': {'equals': '公式確認済'}},
+                {'property': '確認日時', 'date': {'before': row['observed_at']}}
+            ]}})
+        if not result['results']:
+            return None
+        prior = result['results'][0]
+        body = self.call('GET', 'blocks/' + prior['id'] + '/children?page_size=100')
+        codes = [b for b in body.get('results', []) if b.get('type') == 'code']
+        if len(codes) != 1:
+            return None
+        evidence = json.loads(value({'rich_text': codes[0]['code']['rich_text']}))
+        if evidence.get('save_result') != 'verified':
+            return None
+        props = prior['properties']
+        return {'observed_at': props['確認日時']['date']['start'], 'buy_price': props['買取参考額']['number']}
+
+    def finish(self, page_id):
+        blocks = self.call('GET', 'blocks/' + page_id + '/children?page_size=100')
+        codes = [b for b in blocks.get('results', []) if b.get('type') == 'code']
+        if len(codes) != 1:
+            raise ValueError('snapshot body missing or ambiguous; review without recreation')
+        block = codes[0]
+        original = json.loads(value({'rich_text': block['code']['rich_text']}))
+        if original.get('schema_version') != 1 or original.get('record_kind') != 'iphone_price_observation':
+            raise ValueError('unexpected snapshot schema')
+        page = self.call('GET', 'pages/' + page_id)
+        for key, prop in properties(original['row'], original['record_key']).items():
+            if value(page['properties'][key]) != value(prop):
+                raise ValueError('Notion read-back mismatch: ' + key)
+        if original['save_result'] != 'verified':
+            original['save_result'] = 'verified'
+            original['verified_at'] = datetime.now(JST).isoformat(timespec='seconds')
+            self.call('PATCH', 'blocks/' + block['id'], {'code': code_block(original)['code']})
+        read = self.call('GET', 'blocks/' + block['id'])
+        if json.loads(value({'rich_text': read['code']['rich_text']})) != original:
+            raise ValueError('snapshot receipt read-back mismatch')
+        return original
 
     def save(self, row, slot):
         title = f"MM公式|{slot}|{row['model']} {row['capacity']}|{row['color']}"
@@ -291,12 +382,16 @@ class Notion:
             saved = self.call('GET', 'pages/' + found['results'][0]['id'])
             if value(saved['properties']['記録名']) != title:
                 raise ValueError('existing record mismatch')
+            self.finish(saved['id'])
             return saved['id'], False
-        created = self.call('POST', 'pages', {'parent': {'data_source_id': DS}, 'properties': expected})
+        evidence = snapshot(row, slot, self.previous(row))
+        created = self.call('POST', 'pages', {'parent': {'data_source_id': DS}, 'properties': expected,
+                                            'children': [code_block(evidence)]})
         saved = self.call('GET', 'pages/' + created['id'])
         for key, prop in expected.items():
             if value(saved['properties'][key]) != value(prop):
                 raise ValueError('Notion read-back mismatch: ' + key)
+        self.finish(saved['id'])
         return saved['id'], True
 
 
@@ -309,20 +404,35 @@ def main():
     parser.add_argument('--slot', required=True)
     args = parser.parse_args()
     observation = collect(args.channel)
+    observation['schema_version'] = 1
+    observation['save_result'] = 'not_requested'
+    observation['save_results'] = []
     Path(args.output).write_text(json.dumps(observation, ensure_ascii=False, indent=2), encoding='utf-8')
-    if args.save:
-        notion = Notion(os.environ['NOTION_API_KEY'])
-        notion.preflight()
-        for row in observation['rows']:
-            _, created = notion.save(row, args.slot)
-            print('Verified new record' if created else 'Verified existing record; unchanged')
-            if args.verify_rerun:
-                _, duplicate_created = notion.save(row, args.slot)
-                if duplicate_created:
-                    raise ValueError('duplicate prevention failed')
-        print('Notion read-back and duplicate checks passed')
     good = sum(r['quality'] == '公式確認済' for r in observation['rows'])
-    print(f'Official variants verified: {good}/{len(observation["rows"])}')
+    print(f'Official variants verified: {good}/{len(observation["rows"])}', flush=True)
+    if args.save:
+        try:
+            notion = Notion(os.environ['NOTION_API_KEY'])
+            notion.preflight()
+            for row in observation['rows']:
+                _, created = notion.save(row, args.slot)
+                print('Verified new record' if created else 'Verified existing record; unchanged', flush=True)
+                if args.verify_rerun:
+                    _, duplicate_created = notion.save(row, args.slot)
+                    if duplicate_created:
+                        raise ValueError('duplicate prevention failed')
+                observation['save_results'].append({'model': row['model'], 'capacity': row['capacity'],
+                                                    'color': row['color'], 'state': 'verified'})
+            observation['save_result'] = 'verified'
+            print('Notion read-back and duplicate checks passed', flush=True)
+        except Exception as exc:
+            observation['save_result'] = 'failed'
+            observation['save_error_type'] = type(exc).__name__
+            status = getattr(getattr(exc, 'response', None), 'status_code', None)
+            raise SystemExit(f'Notion save failed: {type(exc).__name__}; HTTP={status}; see private destination') from None
+        finally:
+            # Public artifact contains only public-source prices and generic status, never Notion IDs/responses.
+            Path(args.output).write_text(json.dumps(observation, ensure_ascii=False, indent=2), encoding='utf-8')
     if not good:
         raise SystemExit('No official paired prices acquired; failure recorded when saving enabled')
 

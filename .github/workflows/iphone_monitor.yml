@@ -4,6 +4,7 @@ on:
     branches: [codex/iphone-official-monitor]
     paths:
       - 'iphone_monitor.py'
+      - 'iphone-monitor-targets.json'
       - 'tests/test_iphone_monitor.py'
       - 'tests/fixtures/iphone/**'
       - 'requirements-iphone.txt'
@@ -59,8 +60,8 @@ jobs:
             fi
             save_args=(--save)
           elif [ "$EVENT" = "push" ]; then
-            # One explicit branch validation; reruns reuse the same immutable run ID.
-            save_args=(--save --verify-rerun)
+            # Subsequent branch pushes stay read-only while destination access is pending.
+            save_args=()
           elif [ "$SAVE_REQUESTED" = "true" ]; then
             save_args=(--save --verify-rerun)
           fi

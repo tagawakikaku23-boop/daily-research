@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 from iphone_monitor import (Notion, adjustment, money, observation_rows, parse_mix,
-                            parse_apple, properties)
+                            parse_apple, properties, snapshot, code_block)
 
 HAS_BS4 = importlib.util.find_spec('bs4') is not None
 FIXTURES = Path(__file__).parent / 'fixtures' / 'iphone'
@@ -60,6 +60,12 @@ class OfficialParsers(unittest.TestCase):
 
 
 class SaveSafeguards(unittest.TestCase):
+    def setUp(self):
+        for name, result in [('previous', None), ('finish', {})]:
+            task = patch.object(Notion, name, return_value=result)
+            task.start()
+            self.addCleanup(task.stop)
+
     def row(self):
         return observation_rows({}, {}, '2026-10-29T08:00:00+09:00', None, ['failure'])[0]
 
@@ -107,6 +113,52 @@ class SaveSafeguards(unittest.TestCase):
         n = Notion('test', session=object())
         with patch.object(n, 'call', return_value={'results': [{'id': '1'}, {'id': '2'}]}):
             with self.assertRaises(ValueError): n.save(self.row(), 'slot')
+
+
+class ReceiptTests(unittest.TestCase):
+    def test_previous_lookup_separates_official_variant_and_earlier_time(self):
+        n = Notion('test', session=object())
+        row = observation_rows({}, {}, '2026-10-29T08:00:00+09:00', None, [])[0]
+        with patch.object(n, 'call', return_value={'results': []}) as call:
+            self.assertIsNone(n.previous(row))
+            filters = call.call_args.args[2]['filter']['and']
+            self.assertIn({'property': '価格出典', 'url': {'equals': 'https://mobile-mix.jp/'}}, filters)
+            self.assertIn({'property': 'カラー', 'rich_text': {'equals': row['color']}}, filters)
+            self.assertIn({'property': '確認日時', 'date': {'before': row['observed_at']}}, filters)
+
+    def test_change_uses_same_variant_previous_and_handles_missing(self):
+        row = observation_rows({}, {}, '2026-10-29T08:00:00+09:00', None, [])[0]
+        row['buy_price'] = 100000
+        evidence = snapshot(row, 'slot', {'buy_price': 95000, 'observed_at': '2026-10-28T08:00:00+09:00'})
+        self.assertEqual(evidence['price_change']['buy_price_delta'], 5000)
+        self.assertIsNone(snapshot(row, 'slot')['price_change']['buy_price_delta'])
+        row['buy_price'] = None
+        self.assertIsNone(snapshot(row, 'slot', {'buy_price': 95000})['price_change']['buy_price_delta'])
+
+    def test_receipt_verified_only_after_property_readback(self):
+        import json
+        row = observation_rows({}, {}, '2026-10-29T08:00:00+09:00', None, [])[0]
+        evidence = snapshot(row, 'slot')
+        initial = dict(code_block(evidence), id='block')
+        page = {'properties': properties(row, evidence['record_key'])}
+        n = Notion('test', session=object())
+        def response(method, path, body=None):
+            if path.startswith('blocks/page/children'): return {'results': [initial]}
+            if path == 'pages/page': return page
+            if method == 'PATCH':
+                initial['code'] = body['code']; return initial
+            return initial
+        with patch.object(n, 'call', side_effect=response) as call:
+            saved = n.finish('page')
+            self.assertEqual(saved['save_result'], 'verified')
+            self.assertTrue(any(c.args[0] == 'PATCH' for c in call.call_args_list))
+            self.assertEqual(call.call_args_list[-1].args, ('GET', 'blocks/block'))
+
+    def test_missing_snapshot_does_not_recreate(self):
+        n = Notion('test', session=object())
+        with patch.object(n, 'call', return_value={'results': []}) as call:
+            with self.assertRaises(ValueError): n.finish('page')
+            self.assertEqual(call.call_count, 1)
 
 
 if __name__ == '__main__':
