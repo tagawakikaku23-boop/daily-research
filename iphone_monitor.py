@@ -347,6 +347,12 @@ class Notion:
         if evidence.get('save_result') != 'verified':
             return None
         props = prior['properties']
+        original = evidence.get('row', {})
+        if (original.get('model'), original.get('capacity'), original.get('color'), original.get('source')) != (
+                row['model'], row['capacity'], row['color'], row['source']):
+            return None
+        if original.get('buy_price') != props['買取参考額']['number']:
+            return None  # An edited old record is not silently trusted as a comparison baseline.
         return {'observed_at': props['確認日時']['date']['start'], 'buy_price': props['買取参考額']['number']}
 
     def finish(self, page_id):
