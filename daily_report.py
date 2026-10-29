@@ -226,7 +226,7 @@ def get_stock_data(ticker):
         t    = yf.Ticker(ticker)
         info = t.info
         # 週間騰落率・高値からの下落率も計算するため少し長めに取得
-        hist = t.history(period="1mo")
+        hist = t.history(period="1mo", auto_adjust=False)
         if len(hist) < 1:
             return None
 
@@ -256,11 +256,19 @@ def get_stock_data(ticker):
 
         low52   = info.get("fiftyTwoWeekLow")
         high52  = info.get("fiftyTwoWeekHigh")
+        range_known = all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                          and math.isfinite(v) and v > 0 for v in (low52, high52))
+        range_known = range_known and high52 > low52
         if not isinstance(low52, (int, float)) or not math.isfinite(low52) or low52 <= 0:
             low52 = price
         if not isinstance(high52, (int, float)) or not math.isfinite(high52) or high52 <= 0:
             high52 = price
-        div_yield = info.get("dividendYield") or 0
+        # Use annual cash per share, never guess the unit of dividendYield.
+        from investment_analysis import yield_percent
+        annual_dps = info.get("dividendRate")
+        div_yield = yield_percent(annual_dps, price)
+        dividend_known = div_yield is not None
+        div_yield = div_yield if dividend_known else 0
         per     = info.get("trailingPE")
         pbr     = info.get("priceToBook")
         sector  = info.get("sector") or info.get("industry") or ""
@@ -269,16 +277,21 @@ def get_stock_data(ticker):
         position = (price - low52) / span if span > 0 else 0.5
 
         if position < 0.3:
-            signal = "🟢 割安圏"
+            signal = "52週レンジ下部（割安判定ではありません）"
         elif position < 0.65:
-            signal = "🟡 適正圏"
+            signal = "52週レンジ中部"
         else:
-            signal = "🔴 高値圏"
+            signal = "52週レンジ上部"
 
+        if not range_known:
+            signal = "52週データ未確認"
         return {
             "price": price, "chg_pct": chg_pct,
-            "low52": low52, "high52": high52,
+            "low52": low52 if range_known else None, "high52": high52 if range_known else None,
+            "range_known": range_known,
             "position": position, "div_yield": div_yield,
+            "annual_dps": annual_dps, "dividend_known": dividend_known,
+            "currency": info.get("currency"),
             "per": per, "pbr": pbr, "sector": sector, "signal": signal,
             "week_chg": week_chg, "drop_high": drop_high, "asof": asof,
         }
@@ -417,7 +430,8 @@ def get_usdjpy_rate():
     """米国ETF円換算用のドル円レート"""
     try:
         fx = yf.Ticker("JPY=X").history(period="5d")["Close"]
-        return float(fx.iloc[-1]) if len(fx) >= 1 else None
+        from investment_analysis import require_fx
+        return require_fx(float(fx.iloc[-1])) if len(fx) >= 1 else None
     except Exception:
         return None
 
@@ -682,7 +696,8 @@ def get_ticker_news(company_name, max_items=3):
             title = entry.get("title", "").strip()
             link  = entry.get("link", "")
             src   = entry.get("source", {}).get("title", "")
-            if not title or is_noise_news(title):
+            from investment_analysis import company_matches
+            if not title or is_noise_news(title) or not company_matches(title, [clean]):
                 continue
             risks, goods = classify_news(title)
             # 球団保有企業は、業績・配当・M&A等のホワイトリスト該当記事のみ採用
@@ -717,31 +732,9 @@ def trade_signal(position, div_yield, gain_pct=None, risk_flags=None, good_flags
             return f"⛔ 判断保留（{tag}のニュースあり・結果確認まで様子見）"
         return f"🔴 注意（{tag}のニュースあり）"
 
-    # 含み損かつ配当低い → 要検討
-    if gain_pct is not None and gain_pct < -15 and div_yield < 3.0:
-        base = "🔴 要検討（含み損・低配当）"
-    # 割安圏 + 高配当
-    elif position < 0.30 and div_yield >= 4.0:
-        base = "🟢 強い買い検討（割安＋高配当）"
-    elif position < 0.35 and div_yield >= 3.0:
-        base = "🟢 買い検討（割安＋配当良好）"
-    elif position < 0.40 and div_yield >= 3.0:
-        base = "🟢 買い検討圏"
-    # 高値圏
-    elif position > 0.80:
-        base = "🔴 追加購入は慎重（高値圏）"
-    elif position > 0.65:
-        base = "🟡 様子見（やや高値）"
-    # 適正圏
-    elif div_yield >= 3.0:
-        base = "🟡 継続保有（配当良好）"
-    else:
-        base = "🟡 様子見"
+    # Legacy callers do not supply financial evidence. Never infer a buy.
+    return "🟡 判断保留（減配履歴・配当性向・利益・CF・購入条件の確認待ち）"
 
-    # 好材料の付記（評価は据え置き、コメントだけ補強）
-    if good_flags:
-        base += f"　＋{('・'.join(good_flags[:2]))}"
-    return base
 
 # ── 日経電子版スクレイピング ─────────────────────
 def get_nikkei_news(max_items=8):
@@ -1198,20 +1191,23 @@ def _wk_dh_str(d):
         parts.append(f"高値比{d['drop_high']:.1f}%")
     return "  ".join(parts)
 
-def holding_line(ticker, name, shares, cost, d, risk_flags=None, good_flags=None, usdjpy=1):
+def holding_line(ticker, name, shares, cost, d, risk_flags=None, good_flags=None, usdjpy=None):
     if not d or "error" in d:
         return f"{name}  データ取得失敗"
+    from investment_analysis import require_fx
+    if is_usd_ticker(ticker):
+        usdjpy = require_fx(usdjpy)
     price = d["price"]
     # 取得単価(cost)は円換算済みで登録されているため、米国ETFは現在値も円換算して揃える
     if is_usd_ticker(ticker):
-        price_for_gain = price * (usdjpy or 1)
+        price_for_gain = price * usdjpy
         price_disp     = f"¥{price_for_gain:,.0f}(${price:,.2f})"
     else:
         price_for_gain = price
         price_disp     = format_price(ticker, price)
     chg_str  = f"+{d['chg_pct']:.2f}%" if d["chg_pct"] >= 0 else f"{d['chg_pct']:.2f}%"
-    gain_pct = (price_for_gain - cost) / cost * 100
-    gain_str = f"+{gain_pct:.1f}%" if gain_pct >= 0 else f"{gain_pct:.1f}%"
+    gain_pct = (price_for_gain - cost) / cost * 100 if cost > 0 else None
+    gain_str = "未確認" if gain_pct is None else f"{gain_pct:+.1f}%"
     try:
         per_str = f"PER:{float(d['per']):.1f}" if d["per"] else ""
     except (ValueError, TypeError):
@@ -1220,7 +1216,7 @@ def holding_line(ticker, name, shares, cost, d, risk_flags=None, good_flags=None
     wkdh   = _wk_dh_str(d)
     signal = trade_signal(d["position"], d["div_yield"], gain_pct, risk_flags, good_flags)
     return (f"{name}  {price_disp}{asof}  前日比{chg_str}  "
-            f"取得比{gain_str}  52W:{int(d['position']*100)}%  {wkdh}  "
+            f"取得比{gain_str}  52W:{str(int(d['position']*100)) + '%' if d.get('range_known', True) else '未確認'}  {wkdh}  "
             f"{div_label(d['div_yield'])}  {per_str}  → {signal}")
 
 def watch_line(ticker, name, d, risk_flags=None, good_flags=None):
@@ -1235,7 +1231,7 @@ def watch_line(ticker, name, d, risk_flags=None, good_flags=None):
     wkdh   = _wk_dh_str(d)
     signal = trade_signal(d["position"], d["div_yield"], None, risk_flags, good_flags)
     return (f"{name}  {format_price(ticker, d['price'])}{asof}  前日比{chg_str}  "
-            f"52W:{int(d['position']*100)}%  {wkdh}  "
+            f"52W:{str(int(d['position']*100)) + '%' if d.get('range_known', True) else '未確認'}  {wkdh}  "
             f"{div_label(d['div_yield'])}  {per_str}  → {signal}")
 
 # ── Notionブロックヘルパー ────────────────────────
@@ -1442,20 +1438,26 @@ def collect_portfolio(usdjpy):
     data = {"holdings": [], "watch": [], "monitor": [],
             "signals": {}, "total_div": 0.0, "news_lines": [], "portfolio_lines": []}
 
+    from investment_analysis import require_fx
+    require_fx(usdjpy)
     for ticker, name, shares, cost in HOLDINGS:
         d = get_stock_data(ticker)
+        if not d or "error" in d or not d.get("dividend_known"):
+            raise ValueError("保有銘柄の価格・年間配当が未確認のため集計を停止しました")
+        if d.get("currency") != ("USD" if is_usd_ticker(ticker) else "JPY"):
+            raise ValueError("銘柄の通貨が未対応または未確認です")
         news, risks, goods = get_ticker_news(name, max_items=3)
         line = holding_line(ticker, name, shares, cost, d, risks, goods, usdjpy)
         data["holdings"].append((ticker, name, shares, cost, d, news, risks, goods, line))
         data["portfolio_lines"].append(f"[保有] {line}")
         data["signals"][name] = trade_signal(
-            d["position"], d["div_yield"], (d["price"]-cost)/cost*100, risks, goods
+            d["position"], d["div_yield"], ((d["price"] * usdjpy if is_usd_ticker(ticker) else d["price"])-cost)/cost*100 if cost > 0 else None, risks, goods
         ) if d and "error" not in d else "データなし"
         for t, _ in news:
             data["news_lines"].append(f"{name}: {t}")
         # 配当キャッシュフロー（米国ETFはドル円で円換算）
         if d and "error" not in d and d["div_yield"] > 0:
-            px = d["price"] * (usdjpy or 1) if is_usd_ticker(ticker) else d["price"]
+            px = d["price"] * usdjpy if is_usd_ticker(ticker) else d["price"]
             data["total_div"] += px * shares * d["div_yield"] / 100
         time.sleep(0.3)
 
@@ -1518,7 +1520,7 @@ def dividend_blocks(holdings, usdjpy, total_div):
             continue
         px = d["price"] * usdjpy if is_usd_ticker(ticker) else d["price"]
         rows.append((name, d["div_yield"], px * shares * d["div_yield"] / 100,
-                     (d["price"]-cost)/cost*100))
+                     ((px-cost)/cost*100 if cost > 0 else 0)))
     over3  = [r for r in rows if r[1] >= 3.0]
     under3 = [r for r in rows if 0 < r[1] < 3.0]
     if over3:
@@ -1663,7 +1665,7 @@ def build_judgment_table(data, usdjpy, title_label="保有株"):
             cell(name),
             cell(f"¥{px:,.0f}"),
             cell(f"{(d.get('div_yield') or 0):.1f}%"),
-            cell(f"{int(d['position']*100)}%"),
+            cell(f"{str(int(d['position']*100)) + '%' if d.get('range_known', True) else '未確認'}"),
             cell(sig, signal_color(sig)),
         ])
     return table(["銘柄", "現在値", "配当", "52W", "判定"], rows)
@@ -1748,7 +1750,8 @@ def create_morning_page(date_str, now_str, title, icon):
         print("  投稿済みのためスキップ")
         return existing
     print("\n==== 🌅 朝レポート作成中 ====")
-    usdjpy = get_usdjpy_rate() or 1
+    from investment_analysis import require_fx
+    usdjpy = require_fx(get_usdjpy_rate())
     snap   = get_macro_snapshot()
     macro_news = get_macro_news("morning")
     macro_txt  = macro_snapshot_text(snap)
@@ -1908,7 +1911,8 @@ def create_evening_page(date_str, now_str, title, icon):
         print("  投稿済みのためスキップ")
         return existing
     print("\n==== 🌙 夜レポート作成中 ====")
-    usdjpy = get_usdjpy_rate() or 1
+    from investment_analysis import require_fx
+    usdjpy = require_fx(get_usdjpy_rate())
     snap   = get_macro_snapshot()
     macro_news = get_macro_news("evening")
     macro_txt  = macro_snapshot_text(snap)
@@ -2171,7 +2175,8 @@ def create_weekly_page(date_str, now_str, title, icon="🛒"):
     JST    = timezone(timedelta(hours=9))
     now    = datetime.now(JST)
     status = market_status(now)
-    usdjpy = get_usdjpy_rate() or 1
+    from investment_analysis import require_fx
+    usdjpy = require_fx(get_usdjpy_rate())
     data   = collect_portfolio(usdjpy)
 
     blocks = []
@@ -2191,6 +2196,8 @@ def create_weekly_page(date_str, now_str, title, icon="🛒"):
             cautions.append(bul(f"{name}: データ取得失敗（要確認）"))
             continue
         px   = d["price"] * usdjpy if is_usd_ticker(ticker) else d["price"]
+        if cost <= 0:
+            continue  # Unknown acquisition basis; exclude gain comparisons.
         gain = (px - cost) / cost * 100
         sig  = data["signals"].get(name, "")
         reasons = []
@@ -2220,6 +2227,8 @@ def create_weekly_page(date_str, now_str, title, icon="🛒"):
             rows.append([cell(name), cell("取得失敗", "red")])
             continue
         px   = d["price"] * usdjpy if is_usd_ticker(ticker) else d["price"]
+        if cost <= 0:
+            continue  # Unknown acquisition basis; exclude gain comparisons.
         gain = (px - cost) / cost * 100
         sig  = data["signals"].get(name, "")
         asof = f"({d['asof']})" if d.get("asof") else ""
@@ -2250,7 +2259,7 @@ def create_weekly_page(date_str, now_str, title, icon="🛒"):
     if near_buy:
         blocks.append(h3("🟢 水準として魅力的（買い場に近い）"))
         for kind, ticker, name, d, risks, goods, sig in near_buy:
-            why = [f"52週レンジ下から{int(d['position']*100)}%",
+            why = [f"52週レンジ下から{str(int(d['position']*100)) + '%' if d.get('range_known', True) else '未確認'}",
                    f"配当{(d.get('div_yield') or 0):.1f}%"]
             try:
                 if d.get("pbr"): why.append(f"PBR{float(d['pbr']):.2f}")
@@ -2280,7 +2289,7 @@ def create_weekly_page(date_str, now_str, title, icon="🛒"):
             cell(format_price(ticker, d["price"]) + asof),
             cell(f"{(d.get('div_yield') or 0):.1f}%"),
             cell(per), cell(pbr),
-            cell(f"{int(d['position']*100)}%"),
+            cell(f"{str(int(d['position']*100)) + '%' if d.get('range_known', True) else '未確認'}"),
             cell(sig, signal_color(sig)),
         ])
     blocks.append(toggle("📋 候補・監視の全銘柄（クリックで開く）",
@@ -2372,17 +2381,19 @@ def main():
         print(f"\n=== 週次完了 ===\n買い場チェック : {stock_url}")
     elif mode == "morning":
         title = f"{date_str} {time_str} 朝の株レポート"
-        stock_url = create_morning_page(date_str, now_str, title, "🌅")
-        news_url = create_news_page(date_str, time_str)
+        try:
+            stock_url = create_morning_page(date_str, now_str, title, "🌅")
+        finally:
+            # Financial data failure must not prevent the independent news edition.
+            news_url = create_news_page(date_str, time_str)
         print(f"\n=== 朝の完了 ===\n株式 : {stock_url}\nニュース : {news_url}")
     else:
         title = f"{date_str} {time_str} 夜の株レポート"
-        stock_url = create_evening_page(date_str, now_str, title, "🌙")
-        # 株式が投稿済みでも、未完了のニュースだけを再実行できる。
-        news_url = create_news_page(date_str, time_str)
+        try:
+            stock_url = create_evening_page(date_str, now_str, title, "🌙")
+        finally:
+            news_url = create_news_page(date_str, time_str)
         print(f"\n=== 夜の完了 ===\n株式 : {stock_url}\nニュース : {news_url}")
 
 if __name__ == "__main__":
     main()
-
-
