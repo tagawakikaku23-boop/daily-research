@@ -136,10 +136,10 @@ def main():
             "現在値":      {"number": num(d["price"])},
             "前日比%":     {"number": num(d["chg_pct"])},
             "年初来%":     {"number": num(ytd_pct(code, d["price"]))},
-            "配当利回り%": {"number": num(d.get("div_yield"))},
+            "配当利回り%": {"number": num(d.get("div_yield")) if d.get("dividend_known") else None},
             "PER":        {"number": num(d.get("per"))},
             "PBR":        {"number": num(d.get("pbr"))},
-            "52W位置%":    {"number": num(d["position"] * 100, 0)},
+            "52W位置%":    {"number": num(d["position"] * 100, 0) if d.get("range_known") else None},
             "判定":        {"rich_text": [{"text": {"content": m.trade_signal(d["position"], d.get("div_yield") or 0, None, risks, goods)}}]},
             "更新時刻":    {"rich_text": [{"text": {"content": stamp}}]},
         }

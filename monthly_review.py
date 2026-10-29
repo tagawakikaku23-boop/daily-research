@@ -61,9 +61,13 @@ def latest_close(ticker):
 def stocks_value(usdjpy):
     """保有株・ETFの時価合計（実測）"""
     total, fail = 0.0, []
+    from investment_analysis import number
     for ticker, name, shares, cost in m.HOLDINGS:
         d = m.get_stock_data(ticker)
         if not d or "error" in d:
+            fail.append(name)
+            continue
+        if number(shares) is None or d.get("currency") != ("USD" if m.is_usd_ticker(ticker) else "JPY"):
             fail.append(name)
             continue
         px = d["price"] * usdjpy if m.is_usd_ticker(ticker) else d["price"]
@@ -147,52 +151,55 @@ def main():
         v = latest_close(tk)
         if v:
             idx_now[key] = v
-    fx_now = m.get_usdjpy_rate()
+    from investment_analysis import require_fx, number
+    fx_now = require_fx(m.get_usdjpy_rate())
     print("  指数:", {k: round(v, 1) for k, v in idx_now.items()}, "為替:", round(fx_now or 0, 2))
 
     # マスタを読む
+    stocks, fail = stocks_value(fx_now)
+    if fail:
+        raise ValueError("保有株の評価が不完全なため月次更新を停止しました")
     rows = query_all(MASTER_DB)
+    pending_updates = []
     cash = points = funds = pension = tsumitate_total = 0.0
     skipped = []
     for row in rows:
         p = row["properties"]
         name = ptext(p.get("名称"))
         kind = psel(p.get("区分"))
+        if kind in {"現金", "ポイント"} and number(pnum(p.get("金額"))) is None:
+            raise ValueError("現金・ポイントの金額が未確認です")
         if kind == "現金":
-            cash += pnum(p.get("金額")) or 0
+            cash += pnum(p.get("金額"))
             continue
         if kind == "ポイント":
             points += pnum(p.get("金額")) or 0
             continue
         # 投信・年金: 口数×指数推定
-        units    = pnum(p.get("口数")) or 0
+        units    = pnum(p.get("口数"))
         nav_base = pnum(p.get("基準価額")) or 0
         idx_key  = psel(p.get("連動指数"))
         idx_base = pnum(p.get("指数基準値"))
         fx_base  = pnum(p.get("為替基準値"))
-        if not (units and nav_base and idx_key in idx_now and idx_base):
-            skipped.append(name)
-            continue
+        if not (number(units) is not None and number(nav_base) and nav_base > 0
+                and idx_key in idx_now and number(idx_base) and idx_base > 0):
+            raise ValueError("投信評価の入力が不完全なため月次更新を停止しました")
         nav_est = nav_base * (idx_now[idx_key] / idx_base)
-        if fx_base and fx_now:
-            nav_est *= (fx_now / fx_base)
+        if idx_key != "日経225":
+            nav_est *= (fx_now / require_fx(fx_base))
+        if number(nav_est) is None or nav_est <= 0:
+            raise ValueError("投信評価額が不正です")
 
         # 毎月の積立を自動加算（同月2回目以降はスキップ）
-        tsumitate = pnum(p.get("月額積立")) or 0
+        tsumitate = pnum(p.get("月額積立"))
+        if number(tsumitate) is None:
+            raise ValueError("積立金額が未確認です")
         tsumitate_total += tsumitate
         applied   = ptext(p.get("最終積立反映月"))
         if tsumitate > 0 and applied != ym and nav_est > 0:
             add_units = tsumitate / nav_est * 10000
             units += add_units
-            try:
-                requests.patch(f"https://api.notion.com/v1/pages/{row['id']}", headers=H,
-                    json={"properties": {
-                        "口数": {"number": round(units, 0)},
-                        "最終積立反映月": {"rich_text": [{"text": {"content": ym}}]}}},
-                    timeout=30).raise_for_status()
-                print(f"  積立反映: {name} +{tsumitate:,}円 (+{add_units:,.0f}口)")
-            except Exception as e:
-                print(f"  ⚠️ 積立書き戻し失敗 {name}: {e}")
+            pending_updates.append((row['id'], units))
 
         value = units * nav_est / 10000
         if kind == "年金":
@@ -201,9 +208,10 @@ def main():
             funds += value
 
     # 株・ETF（実測）
-    stocks, fail = stocks_value(fx_now or 1)
     total = cash + points + funds + pension + stocks
-    risk_ratio = (total - cash - points) / total * 100 if total else 0
+    if number(total) is None or total <= 0:
+        raise ValueError("資産合計が不正のため保存を停止しました")
+    risk_ratio = (total - cash - points) / total * 100
 
     # 資産推移の履歴（前月比・歩みの計算に使用）
     hist_rows = query_all(HISTORY_DB, sorts=[{"property": "日付", "direction": "ascending"}])
@@ -219,6 +227,14 @@ def main():
 
     print(f"  現金¥{cash:,.0f} 株¥{stocks:,.0f} 投信¥{funds:,.0f} 年金¥{pension:,.0f} pt¥{points:,.0f}")
     print(f"  合計¥{total:,.0f}  リスク資産{risk_ratio:.1f}%  前月比{f'{mom:+.2f}%' if mom is not None else '―(初回)'}")
+
+    # All valuations passed. Only now may contribution mutations start.
+    for page_id, units in pending_updates:
+        requests.patch(f"https://api.notion.com/v1/pages/{page_id}", headers=H,
+            json={"properties": {
+                "口数": {"number": round(units, 0)},
+                "最終積立反映月": {"rich_text": [{"text": {"content": ym}}]}}},
+            timeout=30).raise_for_status()
 
     # 資産推移DBへ1行追加
     props = {
@@ -319,7 +335,7 @@ def main():
     blocks += [
         m.h2("🧭 今月のレビュー（AI）"),
         *m.long_callout(comment, "🧭", "purple_background"),
-        m.callout_rt([m.rt("※ 投信・年金は指数からの推定値（誤差0.5%程度）。毎月の積立は自動反映。"
+        m.callout_rt([m.rt("※ 投信・年金は指数からの推定値で、実残高との差は未検証です。毎月の積立は自動反映。"
                            "マネフォのPDFをClaudeに渡すと実際の口数・現金に補正されます。")],
                      "🕒", "gray_background"),
     ]
