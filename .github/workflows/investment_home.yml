@@ -6,6 +6,14 @@ on:
         description: '検証HOMEへ架空データを保存（通常はfalse）'
         type: boolean
         default: false
+      read_notion:
+        description: '本番監視DBの読取りだけを検証（金融情報はログに出さない）'
+        type: boolean
+        default: false
+      write_logs:
+        description: '検証用の判断・学習ログへ架空データを保存'
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -30,3 +38,14 @@ jobs:
           INVESTMENT_SANDBOX_WRITES: 'true'
           INVESTMENT_SANDBOX_PAGE_ID: '408fc83b-0e47-81da-b814-e8e4f351dbc9'
         run: python investment_home.py --write-sandbox
+      - name: 本番監視DBを読み取りだけで検証
+        if: inputs.read_notion
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+        run: python investment_home.py --read-notion
+      - name: 検証用の週次判断・学習ログを保存
+        if: inputs.write_logs
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          INVESTMENT_SANDBOX_WRITES: 'true'
+        run: python investment_home.py --write-logs

@@ -113,9 +113,11 @@ class NewsTests(TestCase):
         self.assertFalse(company_matches('別企業が減配', ['架空工業']))
 
     def test_legacy_news_filters_before_classification(self):
+        from email.utils import format_datetime
+        published = format_datetime(datetime.now(timezone.utc))
         feed = Mock()
-        feed.parse.return_value.entries = [dict(title='別企業が減配', link='https://example.com'),
-                                          dict(title='架空工業が増配', link='https://example.com/a')]
+        feed.parse.return_value.entries = [dict(title='別企業が減配', link='https://example.com', published=published),
+                                          dict(title='架空工業が増配', link='https://example.com/a', published=published)]
         classifier = Mock(return_value=([], ['増配']))
         ns = extract('daily_report.py', {'get_ticker_news'}, feedparser=feed,
                      SPORTS_HEAVY=[], is_noise_news=lambda t: False, classify_news=classifier)

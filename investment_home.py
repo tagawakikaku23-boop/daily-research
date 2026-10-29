@@ -17,15 +17,16 @@ def demo_rows(now):
                 net_income=100, operating_cf=150, free_cf=80, dividend_cut_5y=False,
                 max_price=1100, target_yield_pct=3.5, sector_room=True,
                 currency="JPY", dividend_currency="JPY", dividend_basis="forward_annual")
-    return [dict(base, name="架空A・通信", kind="holding", shares=10, sector="通信"),
-            dict(base, name="架空B・食品", kind="watch", sector="食品"),
-            dict(base, name="架空C・住宅", kind="watch", sector="住宅"),
-            dict(base, name="架空D・資料不足", kind="watch", sector="素材", free_cf=None)]
+    return [dict(base, ticker="DEMO-A", name="架空A・通信", kind="holding", shares=10, sector="通信"),
+            dict(base, ticker="DEMO-B", name="架空B・食品", kind="watch", sector="食品"),
+            dict(base, ticker="DEMO-C", name="架空C・住宅", kind="watch", sector="住宅"),
+            dict(base, ticker="DEMO-D", name="架空D・資料不足", kind="watch", sector="素材", free_cf=None)]
 
 
 def preview(now):
     result = dashboard(demo_rows(now), 1000, now)
     result["synthetic"] = True
+    result["generated_at"] = now.isoformat()
     return result
 
 
@@ -93,14 +94,43 @@ class NotionSandbox:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--write-sandbox", action="store_true")
+    parser.add_argument("--write-logs", action="store_true")
+    parser.add_argument("--read-notion", action="store_true")
     args = parser.parse_args()
-    result = preview(datetime.now(JST))
+    now = datetime.now(JST)
+    if args.read_notion:
+        if args.write_sandbox or args.write_logs:
+            raise ValueError("実データの書込みはまだ有効化していません")
+        from investment_notion import NotionClient
+        client = NotionClient(os.environ['NOTION_API_KEY'])
+        raw_goal = os.environ.get('INVESTMENT_ANNUAL_GOAL_JPY')
+        goal = None
+        if raw_goal:
+            goal = float(raw_goal)
+        else:
+            try:
+                goal = client.read_goal()
+            except (RuntimeError, ValueError):
+                # The existing integration may not have access to the new private page.
+                # Keep the goal unknown; never widen access or invent a default amount.
+                pass
+        # No portfolio, rendered amounts, or source response goes to public stdout.
+        dashboard(client.read_portfolio(), goal, now)
+        print('Read-only Notion analysis completed. Financial details suppressed; no writes.')
+        return
+    result = preview(now)
+    if args.write_logs:
+        if os.environ.get("INVESTMENT_SANDBOX_WRITES") != "true":
+            raise ValueError("検証書込みフラグが無効です")
+        from investment_notion import NotionClient, save_weekly_logs
+        statuses = save_weekly_logs(NotionClient(os.environ['NOTION_API_KEY']), demo_rows(now), result)
+        print('Synthetic weekly logs completed; ' + str(len(statuses)) + ' records reconciled.')
     if args.write_sandbox:
         if os.environ.get("INVESTMENT_SANDBOX_WRITES") != "true":
             raise ValueError("検証書込みフラグが無効です")
         status = NotionSandbox(os.environ["NOTION_API_KEY"], os.environ["INVESTMENT_SANDBOX_PAGE_ID"]).save(result)
         print("Sandbox synthetic preview: " + status)
-    else:
+    elif not args.write_logs:
         print(render(result))
 
 

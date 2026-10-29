@@ -691,14 +691,19 @@ def get_ticker_news(company_name, max_items=3):
             query = urllib.parse.quote(clean)
         url   = f"https://news.google.com/rss/search?q={query}&hl=ja&gl=JP&ceid=JP:ja"
         feed  = feedparser.parse(url)
+        from investment_analysis import news_identity
+        from datetime import datetime, timezone
         items, all_risks, all_goods = [], [], []
+        seen_links, seen_titles = set(), set()
         for entry in feed.entries:
             title = entry.get("title", "").strip()
             link  = entry.get("link", "")
             src   = entry.get("source", {}).get("title", "")
-            from investment_analysis import company_matches
-            if not title or is_noise_news(title) or not company_matches(title, [clean]):
+            identity = news_identity(entry, [clean], datetime.now(timezone.utc))
+            if not identity or is_noise_news(title) or identity in seen_links or title.casefold() in seen_titles:
                 continue
+            seen_links.add(identity)
+            seen_titles.add(title.casefold())
             risks, goods = classify_news(title)
             # 球団保有企業は、業績・配当・M&A等のホワイトリスト該当記事のみ採用
             if sports_heavy and not (risks or goods):
@@ -1440,12 +1445,13 @@ def collect_portfolio(usdjpy):
 
     from investment_analysis import require_fx
     require_fx(usdjpy)
+    dividend_complete = True
     for ticker, name, shares, cost in HOLDINGS:
         d = get_stock_data(ticker)
+        if d and "error" not in d and d.get("currency") != ("USD" if is_usd_ticker(ticker) else "JPY"):
+            d = dict(d, error="銘柄の通貨が未対応または未確認です")
         if not d or "error" in d or not d.get("dividend_known"):
-            raise ValueError("保有銘柄の価格・年間配当が未確認のため集計を停止しました")
-        if d.get("currency") != ("USD" if is_usd_ticker(ticker) else "JPY"):
-            raise ValueError("銘柄の通貨が未対応または未確認です")
+            dividend_complete = False
         news, risks, goods = get_ticker_news(name, max_items=3)
         line = holding_line(ticker, name, shares, cost, d, risks, goods, usdjpy)
         data["holdings"].append((ticker, name, shares, cost, d, news, risks, goods, line))
@@ -1460,6 +1466,9 @@ def collect_portfolio(usdjpy):
             px = d["price"] * usdjpy if is_usd_ticker(ticker) else d["price"]
             data["total_div"] += px * shares * d["div_yield"] / 100
         time.sleep(0.3)
+
+    if not dividend_complete:
+        data["total_div"] = None
 
     for ticker, name in WATCHLIST:
         d = get_stock_data(ticker)
@@ -1512,8 +1521,9 @@ def write_news_flags(data):
 
 def dividend_blocks(holdings, usdjpy, total_div):
     """配当キャッシュフローのブロックを生成（ETF円換算済み）"""
+    total_label = f"¥{total_div:,.0f}" if total_div is not None else "算定保留（一部の配当・価格が未確認）"
     blocks = [h2("💰 配当キャッシュフロー（個別株・ETF）"),
-              callout(f"年間配当収入（概算）: ¥{total_div:,.0f}　※投資信託除く／米ETFはドル円{usdjpy:.1f}で円換算", "💴")]
+              callout(f"年間配当収入（概算）: {total_label}　※投資信託除く／米ETFはドル円{usdjpy:.1f}で円換算", "💴")]
     rows = []
     for ticker, name, shares, cost, d, *_ in holdings:
         if not d or "error" in d or d["div_yield"] <= 0:
@@ -1548,18 +1558,27 @@ def deep_dive_questions(data):
 
 # ── 見やすい版：集計とセクション組み立て ─────────────
 def portfolio_metrics(data, usdjpy):
-    """評価額・含み損益・年間配当・平均利回りを算出"""
+    """Missing constituents invalidate the corresponding aggregate, not the report."""
     val = pl = div = 0.0
+    value_ok = cost_ok = dividend_ok = True
     for ticker, name, shares, cost, d, *_ in data["holdings"]:
         if not d or "error" in d:
+            value_ok = cost_ok = dividend_ok = False
             continue
         px = d["price"] * usdjpy if is_usd_ticker(ticker) else d["price"]
         val += px * shares
-        pl  += (px - cost) * shares
-        if (d.get("div_yield") or 0) > 0:
+        if cost > 0:
+            pl += (px - cost) * shares
+        else:
+            cost_ok = False
+        if not d.get("dividend_known"):
+            dividend_ok = False
+        else:
             div += px * shares * d["div_yield"] / 100
-    yld = div / val * 100 if val else 0
-    return val, pl, div, yld
+    return (val if value_ok else None, pl if cost_ok else None,
+            div if dividend_ok else None,
+            div / val * 100 if value_ok and dividend_ok and val > 0 else None)
+
 
 def _signed(pct, digits=1):
     return f"{'+' if pct >= 0 else ''}{pct:.{digits}f}%"
@@ -1567,14 +1586,16 @@ def _signed(pct, digits=1):
 def build_summary_cards(data, usdjpy):
     """ポートフォリオ・サマリーの4カード（段組み）"""
     val, pl, div, yld = portfolio_metrics(data, usdjpy)
-    pl_pct = pl / (val - pl) * 100 if (val - pl) else 0
-    pl_color = "green_background" if pl >= 0 else "red_background"
+    pl_pct = pl / (val - pl) * 100 if val is not None and pl is not None and val != pl else None
+    pl_color = "gray_background" if pl is None else ("green_background" if pl >= 0 else "red_background")
     return columns([
-        [card("💰 評価額", [f"¥{val:,.0f}"], "💰", "gray_background")],
-        [card("📈 含み損益", [f"{'+' if pl>=0 else ''}¥{pl:,.0f}", _signed(pl_pct)], "📈", pl_color)],
-        [card("💴 年間配当(概算)", [f"¥{div:,.0f}"], "💴", "blue_background")],
-        [card("📊 平均利回り", [f"{yld:.1f}%"], "📊", "yellow_background")],
+        [card("💰 評価額", [f"¥{val:,.0f}" if val is not None else "算定保留"], "💰", "gray_background")],
+        [card("📈 含み損益", [f"{pl:+,.0f}円" if pl is not None else "算定保留",
+                           _signed(pl_pct) if pl_pct is not None else "未確認"], "📈", pl_color)],
+        [card("💴 年間配当(概算)", [f"¥{div:,.0f}" if div is not None else "算定保留"], "💴", "gray_background")],
+        [card("📊 平均利回り", [f"{yld:.1f}%" if yld is not None else "算定保留"], "📊", "gray_background")],
     ])
+
 
 def collect_buys_and_cautions(data):
     """買い場候補・要注意（⛔）銘柄を仕分け"""

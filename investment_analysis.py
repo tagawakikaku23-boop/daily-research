@@ -2,6 +2,8 @@
 import math
 import re
 import unicodedata
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+from email.utils import parsedate_to_datetime
 from datetime import datetime, timedelta, timezone
 
 JST = timezone(timedelta(hours=9))
@@ -73,6 +75,28 @@ def company_matches(title, aliases):
         elif name in text:
             return True
     return False
+
+
+def news_identity(entry, aliases, now, days=14):
+    """Reject undated/future/unrelated news; remove tracking-only URL variation."""
+    title = entry.get('title', '').strip()
+    source = (entry.get('source') or {}).get('title', '')
+    if source and title.endswith(' - ' + source):
+        title = title[:-(len(source) + 3)]
+    if not company_matches(title, aliases):
+        return None
+    try:
+        stamp = parsedate_to_datetime(entry.get('published') or entry.get('updated') or '')
+        if stamp.tzinfo is None or not timedelta(0) <= now - stamp <= timedelta(days=days):
+            return None
+        url = urlsplit(entry.get('link', ''))
+        if url.scheme not in {'https', 'http'} or not url.netloc or url.username or url.password:
+            return None
+        query = [(k, v) for k, v in parse_qsl(url.query, keep_blank_values=True)
+                 if not k.lower().startswith('utm_') and k.lower() not in {'fbclid', 'gclid'}]
+        return urlunsplit((url.scheme.lower(), url.netloc.lower(), url.path, urlencode(sorted(query)), ''))
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def fresh(asof, now, days):
