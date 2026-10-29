@@ -218,8 +218,8 @@ class MonthlySafetyTests(TestCase):
         clock = Mock()
         clock.now.return_value = NOW
         api = Mock()
-        ns = extract('monthly_review.py', {'main'}, m=module, datetime=clock, JST=timezone.utc, requests=api)
-        with self.assertRaises(ValueError):
+        ns = extract('monthly_review.py', {'main'}, m=module, datetime=clock, JST=timezone.utc, requests=api, PROXY={})
+        with self.assertRaisesRegex(ValueError, '為替が未確認'):
             ns['main']()
         api.patch.assert_not_called()
         api.post.assert_not_called()
