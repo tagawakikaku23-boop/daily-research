@@ -2387,7 +2387,7 @@ def main():
         else:
             stock_url = create_evening_page(date_str, now_str, title, icon)
             try:
-                news_url = None if globals().get("REPORT_COMPONENT") == "stock" else create_news_page(date_str, time_str)
+                news_url = create_news_page(date_str, time_str)
             except Exception as e:
                 news_url = f"生成失敗: {e}"
                 print(f"  ⚠️ ニュースダイジェスト生成失敗（株レポートは完了済み）: {e}")
