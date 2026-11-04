@@ -1,0 +1,47 @@
+name: My Investment Research (manual staging)
+# Production schedule is deliberately not enabled before approval.
+# Approved target UTC: 30 22 * * 0-4 (JST weekdays 07:30)
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        type: boolean
+        default: false
+        description: 'Production write requires main and RESEARCH_PUBLISH_ENABLED=true'
+      report_date:
+        type: string
+        required: false
+        description: 'JST YYYY-MM-DD for retry; within 48 hours'
+permissions:
+  contents: read
+concurrency:
+  group: research-investment
+  cancel-in-progress: false
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests feedparser yfinance jpholiday
+      - name: Run independent report
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          RESEARCH_PUBLISH_ENABLED: ${{ vars.RESEARCH_PUBLISH_ENABLED }}
+          PUBLISH: ${{ inputs.publish }}
+          REPORT_DATE: ${{ inputs.report_date }}
+        shell: bash
+        run: |
+          args=("investment")
+          if [ -n "$REPORT_DATE" ]; then args+=(--date "$REPORT_DATE"); fi
+          if [ "$PUBLISH" = "true" ]; then args+=(--publish); fi
+          python research_run.py "${args[@]}"
+      - name: Failure summary
+        if: failure()
+        run: echo 'Research failed or is incomplete. Review the run and private Notion report. No financial data is included in this log.' >> "$GITHUB_STEP_SUMMARY"
+
