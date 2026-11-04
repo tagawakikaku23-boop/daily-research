@@ -15,6 +15,51 @@ PAGE = "00000000-0000-0000-0000-000000000002"
 
 
 class CoreTests(unittest.TestCase):
+    def test_publication_requires_date_before_any_api_access(self):
+        from research_run import run
+        with patch.dict("os.environ", {"GITHUB_REF": "refs/heads/main", "RESEARCH_PUBLISH_ENABLED": "true"}):
+            with patch("research_run.Store") as client:
+                with self.assertRaisesRegex(ValueError, "explicit report date"):
+                    run("news", NOW, write=True)
+                client.assert_not_called()
+
+    def test_degraded_existing_report_does_not_become_success(self):
+        from research_run import run
+        from research_briefing import title_key
+        _, key = title_key("news", scheduled_slot("news", NOW))
+        blocks = complete_blocks([block("partial")], {"key": key, "degraded": True})
+        with patch.dict("os.environ", {"NOTION_API_KEY": "fake"}):
+            with patch("research_run.Store") as client:
+                client.return_value.find.return_value = {"id": PAGE}
+                client.return_value.children.return_value = blocks
+                with self.assertRaisesRegex(RuntimeError, "degraded"):
+                    run("news", NOW)
+                client.return_value.save.assert_not_called()
+
+    def test_category_mapping_is_independent_of_legacy_dictionary_order(self):
+        from research_sources import collect_news, FEED_CATEGORIES
+        feeds = {key: [key] for key in reversed(FEED_CATEGORIES)}
+        entry = self.entry()
+        with patch("research_sources.legacy_constant", return_value=feeds):
+            with patch("research_sources.rss", side_effect=lambda url, *_: [dict(entry, link="https://example.org/" + str(list(feeds).index(url)))] if url in feeds else []):
+                articles, _ = collect_news(NOW, session=object(), parser=object())
+        self.assertEqual({a["category"] for a in articles}, set(FEED_CATEGORIES.values()))
+
+    def test_investment_news_uses_history_and_deduplicates_within_report(self):
+        a = article(self.entry(), "投資ニュース", "source", NOW)
+        page = {"properties": {"コード": {"rich_text": [{"plain_text": "TEST"}]},
+                               "銘柄名": {"title": [{"plain_text": "Example"}]},
+                               "区分": {"select": {"name": "保有"}}}}
+        def quote(*_):
+            return {"error": "取得失敗"}
+        def news(*_):
+            return [a, a]
+        args = (scheduled_slot("investment", NOW), NOW, [page], [], [], [])
+        blocks = investment_report(*args, [], quote=quote, news=news)[2]
+        self.assertEqual(read_manifest(blocks)["article_ids"], [a["id"]])
+        blocks = investment_report(*args, [{"article_ids": [a["id"]]}], quote=quote, news=news)[2]
+        self.assertEqual(read_manifest(blocks)["article_ids"], [])
+
     def test_news_cross_midnight_maps_previous_scheduled_day(self):
         self.assertEqual(str(scheduled_slot("news", NOW.replace(hour=2)).date()), "2026-11-03")
 
@@ -155,6 +200,20 @@ class FakeNotion:
 
 
 class StoreTests(unittest.TestCase):
+    def test_category_properties_saved_without_creating_schema_options(self):
+        schema = {"分野": {"type": "multi_select", "multi_select": {"options": [{"name": "新潟"}]}}}
+        self.blocks = complete_blocks([block("fact")], {"key": "k", "stream": "news", "categories": ["新潟"]})
+        with patch.object(self.store, "check_destination", return_value=schema):
+            self.save()
+        self.assertEqual(self.api.pages[0]["properties"]["分野"], {"multi_select": [{"name": "新潟"}]})
+
+    def test_unknown_category_blocks_creation(self):
+        self.blocks = complete_blocks([block("fact")], {"key": "k", "categories": ["unknown"]})
+        with patch.object(self.store, "check_destination", return_value={"分野": {"type": "multi_select", "multi_select": {"options": []}}}):
+            with self.assertRaises(ValueError):
+                self.save()
+        self.assertFalse(self.api.pages)
+
     def setUp(self):
         self.api = FakeNotion()
         self.store = Store("fake", DS, transport=self.api, sleep=lambda _: None)
@@ -233,4 +292,5 @@ class StoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 

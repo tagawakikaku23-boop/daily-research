@@ -6,7 +6,11 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 from research_core import article, legacy_constant, clean
 
-CATEGORIES = ["日本経済", "世界経済", "AI", "携帯業界", "新潟"]
+FEED_CATEGORIES = {
+    "📰 日本経済": "日本経済", "🌐 世界経済": "世界経済",
+    "💻 IT・テクノロジー": "AI", "📱 携帯キャリア・ガジェット": "携帯業界",
+    "🌾 新潟・地域経済": "新潟",
+}
 EXTRA_SEARCH = {
     "金融": "日本銀行 金利 為替",
     "ビジネス": "中小企業 M&A 事業承継",
@@ -43,7 +47,10 @@ def collect_news(now, history=(), session=None, parser=None):
                       status_forcelist=[429, 500, 502, 503, 504], allowed_methods=["GET"])))
     if parser is None:
         import feedparser as parser
-    feeds = {cat: urls for cat, urls in zip(CATEGORIES, legacy_constant("NEWS_FEEDS").values())}
+    configured = legacy_constant("NEWS_FEEDS")
+    if set(configured) != set(FEED_CATEGORIES):
+        raise ValueError("Legacy feed categories changed; explicit mapping required")
+    feeds = {cat: configured[key] for key, cat in FEED_CATEGORIES.items()}
     for cat, query in EXTRA_SEARCH.items():
         feeds[cat] = ["https://news.google.com/rss/search?q=" + quote(query) + "&hl=ja&gl=JP&ceid=JP:ja"]
     seen = {item for report in history for item in report.get("article_ids", [])}
@@ -127,4 +134,5 @@ def summaries(articles, api_key, model="openai/gpt-oss-120b"):
         return answers
     except Exception:
         return {}
+
 

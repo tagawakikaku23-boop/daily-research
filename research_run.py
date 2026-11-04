@@ -19,6 +19,8 @@ DESTINATIONS = {"news": "30df8385-7101-4e54-a000-a281e6546b1d",
 
 
 def run(stream, now, report_date=None, write=False):
+    if write and not report_date:
+        raise ValueError("Publication requires an explicit report date; retries must keep the same target")
     if write and (os.environ.get("RESEARCH_PUBLISH_ENABLED") != "true" or
                   os.environ.get("GITHUB_REF") != "refs/heads/main"):
         raise ValueError("Production publication is not enabled")
@@ -33,9 +35,16 @@ def run(stream, now, report_date=None, write=False):
             manifest = read_manifest(store.children(existing["id"]))
             if manifest["key"] != key:
                 raise RuntimeError("Report identity mismatch")
+            if manifest.get("degraded"):
+                raise RuntimeError("Existing report is degraded; review required, no automatic overwrite")
             return "already_exists"
-    elif store.existing(title, key):
-        return "already_exists"
+    else:
+        existing = store.existing(title, key)
+        if existing:
+            manifest = read_manifest(store.children(existing["id"]))
+            if manifest.get("degraded"):
+                raise RuntimeError("Existing report is degraded; review required, no automatic overwrite")
+            return "already_exists"
     history = store.history((now - timedelta(days=35)).date().isoformat(), stream)
     if stream == "news":
         articles, errors = collect_news(now, history)
@@ -64,4 +73,5 @@ if __name__ == "__main__":
         run(args.stream, datetime.now(JST), args.date, args.publish)
     except Exception:
         raise SystemExit("Research failed or degraded. Inspect private report; raw details suppressed.")
+
 

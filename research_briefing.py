@@ -59,7 +59,8 @@ def news_report(slot, now, articles, errors, summaries):
         body.append(block("AI要約（未検証）: " + summary + "\n背景（AI・未検証）: " + background +
                           "\n仕事・生活への確認ポイント: " + RELEVANCE.get(a["category"], "必要に応じて原文を確認。")))
     manifest = {"key": key, "stream": "news", "retrieved_at": now.isoformat(),
-                "article_ids": [a["id"] for a in articles], "degraded": bool(errors)}
+                "article_ids": [a["id"] for a in articles],
+                "categories": sorted({a["category"] for a in articles}), "degraded": bool(errors)}
     return title, key, complete_blocks(body, manifest)
 
 
@@ -137,6 +138,7 @@ def investment_report(slot, now, pages, funds, assets, forecast, history, quote=
     body += [block("2. 保有銘柄の重要な変化", "heading_2"),
              block("以下はNotionの登録上の区分です。保有確認日がない銘柄は、現在の保有数量・取得単価を未確認として扱います。")]
     results, news_ids, events = [], [], []
+    seen_news = {item for report in history for item in report.get("article_ids", [])}
     for row in rows:
         data = quote(row["ticker"], now)
         results.append((row, data))
@@ -146,7 +148,12 @@ def investment_report(slot, now, pages, funds, assets, forecast, history, quote=
             continue
         name = row["name"].split("★")[0].strip()
         try:
-            items = news(name, now)
+            fetched = news(name, now)
+            items = []
+            for item in fetched:
+                if item["id"] not in seen_news:
+                    seen_news.add(item["id"])
+                    items.append(item)
         except Exception:
             items = []
             errors.append("news")
@@ -216,4 +223,5 @@ def investment_report(slot, now, pages, funds, assets, forecast, history, quote=
                 "tip_id": tip["id"], "discovery_tickers": discoveries, "article_ids": news_ids,
                 "degraded": bool(errors)}
     return title, key, complete_blocks(body, manifest)
+
 

@@ -165,6 +165,13 @@ class Store:
         props = {"名前": text_prop(title, True), "日付": {"date": {"start": date}}}
         if stream == "news" and "便" in props_schema:
             props["便"] = {"select": {"name": "🌅 朝"}}
+        if stream == "news" and "分野" in props_schema:
+            field = props_schema["分野"]
+            categories = read_manifest(blocks).get("categories", [])
+            allowed = {o["name"] for o in field.get("multi_select", {}).get("options", [])}
+            if field.get("type") != "multi_select" or set(categories) - allowed:
+                raise ValueError("News category schema mismatch")
+            props["分野"] = {"multi_select": [{"name": c} for c in categories]}
         if stream == "investment" and "種類" in props_schema:
             props["種類"] = {"select": {"name": "🌅 朝"}}
         # Entire report in a single create; ambiguous timeouts are reconciled by
@@ -188,4 +195,5 @@ class Store:
         if (final.get("icon") or {}).get("emoji") != "✅":
             raise RuntimeError("Completion readback failed")
         return "created"
+
 

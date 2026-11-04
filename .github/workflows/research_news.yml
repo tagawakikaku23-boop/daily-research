@@ -10,8 +10,8 @@ on:
         description: 'Production write requires main and RESEARCH_PUBLISH_ENABLED=true'
       report_date:
         type: string
-        required: false
-        description: 'JST YYYY-MM-DD for retry; within 48 hours'
+        required: true
+        description: 'Required JST YYYY-MM-DD; reuse the same date on retry; within 48 hours'
 permissions:
   contents: read
 concurrency:
