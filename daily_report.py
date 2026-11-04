@@ -29,6 +29,7 @@ if env_path.exists():
 NOTION_API_KEY = os.environ["NOTION_API_KEY"]
 PARENT_PAGE_ID = os.environ["NOTION_PAGE_ID"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+REPORT_COMPONENT = os.environ.get("REPORT_COMPONENT", "")
 # レポート格納先データベース（第3-4弾④：氾濫対策）。未設定なら従来どおりページ直下に作成
 NOTION_DB_ID = os.environ.get("NOTION_DB_ID", "37afc83b-0e47-81d4-901d-d20a958122e0")
 # 保有・監視銘柄はNotionのみに保存。読込失敗時は停止する。
@@ -171,7 +172,8 @@ def load_watchlist():
         raise RuntimeError("Notion監視銘柄リストを読み込めないため配信を停止しました")
     return via_notion
 
-HOLDINGS, WATCHLIST, MONITOR = load_watchlist()
+# News runs never read portfolio data, including during module import.
+HOLDINGS, WATCHLIST, MONITOR = ([], [], []) if os.environ.get("REPORT_COMPONENT") == "news" else load_watchlist()
 
 # ── 発掘銘柄プール（監視外の高配当・連続増配・割安候補）第4弾② ──
 # (ticker, 銘柄名, セクター) — watchlist.csv に載っている銘柄は自動除外される
@@ -979,6 +981,7 @@ def get_niigata_nippo_news(max_items=8):
 # ── カテゴリニュース取得（RSS） ───────────────────
 def get_rss_news(urls, max_items=5, retries=3, wait=3):
     """RSS取得。一時的な失敗（サイト混雑・通信瞬断）に備えて数回リトライする。"""
+    from news_content import fresh_entry
     items = []
     for url in urls:
         for attempt in range(retries):
@@ -988,6 +991,8 @@ def get_rss_news(urls, max_items=5, retries=3, wait=3):
                 if not entries:
                     raise ValueError("entries empty")  # 一時不調とみなして再試行
                 for entry in entries:
+                    if not fresh_entry(entry):
+                        continue
                     title = entry.get("title", "").strip()
                     link  = entry.get("link", "")
                     if title and len(title) > 5:
@@ -2033,7 +2038,8 @@ def create_evening_page(date_str, now_str, title, icon):
     return url
 
 # ── ニュースページ ────────────────────────────────
-def create_news_page(date_str, time_str=""):
+def create_news_page(date_str, time_str="", retrieved_at=None):
+    from news_content import article_key
     title = f"{date_str} {time_str} ニュースダイジェスト".replace("  ", " ").strip()
     existing = existing_report(title, "📰")
     if existing:
@@ -2043,16 +2049,27 @@ def create_news_page(date_str, time_str=""):
     blocks       = []
     all_news_for_digest = []
 
+    # One article per report, including overlaps between newspaper and RSS feeds.
+    seen_news = set()
+    def unique_news(items):
+        result = []
+        for headline, link in items:
+            identity = article_key(headline, link)
+            if identity not in seen_news:
+                seen_news.add(identity)
+                result.append((headline, link))
+        return result
+
     # 日経新聞スクレイピング
     print("  📰 日経新聞取得中...")
-    nikkei_items = get_nikkei_news(max_items=15)
+    nikkei_items = unique_news(get_nikkei_news(max_items=15))
     if nikkei_items:
         for title, _ in nikkei_items:
             all_news_for_digest.append(f"日経新聞: {title}")
 
     # 新潟日報スクレイピング
     print("  📰 新潟日報取得中...")
-    niigata_nippo_items = get_niigata_nippo_news(max_items=8)
+    niigata_nippo_items = unique_news(get_niigata_nippo_news(max_items=8))
     if niigata_nippo_items:
         for title, _ in niigata_nippo_items:
             all_news_for_digest.append(f"新潟日報: {title}")
@@ -2061,15 +2078,18 @@ def create_news_page(date_str, time_str=""):
     category_news = {}
     for category, urls in NEWS_FEEDS.items():
         print(f"  {category}...")
-        items = get_rss_news(urls, max_items=10)
+        items = unique_news(get_rss_news(urls, max_items=10))
         category_news[category] = items
         for title, _ in items:
             all_news_for_digest.append(f"{category}: {title}")
 
+    if not all_news_for_digest:
+        raise RuntimeError("ニュースを取得できないため投稿を停止しました")
+
     # ヘッダー
     total_cnt = len(all_news_for_digest)
     blocks.append(callout_rt(
-        [rt(f"生成: {date_str} {time_str}", bold=True),
+        [rt(f"配信枠: {date_str} {time_str}　｜　実際の取得開始: {retrieved_at or (date_str + ' ' + time_str)}", bold=True),
          rt(f"　｜　今日のニュース（全{total_cnt}件を収集・AIが要約）")],
         "📰", "blue_background"))
 
@@ -2115,6 +2135,7 @@ def create_news_page(date_str, time_str=""):
             children = [para("ニュース取得できませんでした")]
         blocks.append(toggle(f"{category}（{cnt}件）", children))
     blocks.append(freshness_note())
+    blocks.append(para("RSSは公開・更新日時を確認できる直近3日以内の記事を使用。新聞見出しの公開日時は未確認。配信枠の時点を再現した記事一覧ではなく、上記取得開始時刻に取得した内容です。"))
 
     title = f"{date_str} {time_str} ニュースダイジェスト".replace("  ", " ").strip()
     url = create_page(title, blocks, "📰")
@@ -2343,6 +2364,13 @@ def resolve_mode(hour):
 def main():
     JST = timezone(timedelta(hours=9))
     now      = datetime.now(JST)
+    if globals().get("REPORT_COMPONENT") == "news":
+        from news_delivery import news_slot
+        edition = os.environ["NEWS_EDITION"]
+        slot = news_slot(edition, now, now, os.environ["NEWS_DATE"])
+        create_news_page(slot.strftime("%Y-%m-%d"), slot.strftime("%H:%M"),
+                         retrieved_at=now.isoformat(timespec="seconds"))
+        return
     date_str = now.strftime("%Y-%m-%d")
     time_str = now.strftime("%H:%M")
     now_str  = now.strftime("%Y-%m-%d %H:%M")
@@ -2359,7 +2387,7 @@ def main():
         else:
             stock_url = create_evening_page(date_str, now_str, title, icon)
             try:
-                news_url = create_news_page(date_str, time_str)
+                news_url = None if globals().get("REPORT_COMPONENT") == "stock" else create_news_page(date_str, time_str)
             except Exception as e:
                 news_url = f"生成失敗: {e}"
                 print(f"  ⚠️ ニュースダイジェスト生成失敗（株レポートは完了済み）: {e}")
@@ -2373,16 +2401,17 @@ def main():
     elif mode == "morning":
         title = f"{date_str} {time_str} 朝の株レポート"
         stock_url = create_morning_page(date_str, now_str, title, "🌅")
-        news_url = create_news_page(date_str, time_str)
+        news_url = None if globals().get("REPORT_COMPONENT") == "stock" else create_news_page(date_str, time_str)
         print(f"\n=== 朝の完了 ===\n株式 : {stock_url}\nニュース : {news_url}")
     else:
         title = f"{date_str} {time_str} 夜の株レポート"
         stock_url = create_evening_page(date_str, now_str, title, "🌙")
         # 株式が投稿済みでも、未完了のニュースだけを再実行できる。
-        news_url = create_news_page(date_str, time_str)
+        news_url = None if globals().get("REPORT_COMPONENT") == "stock" else create_news_page(date_str, time_str)
         print(f"\n=== 夜の完了 ===\n株式 : {stock_url}\nニュース : {news_url}")
 
 if __name__ == "__main__":
     main()
+
 
 
