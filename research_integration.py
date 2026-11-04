@@ -1,6 +1,7 @@
 """Live Store contract test using only synthetic data in a fixed sandbox."""
 import json
 import os
+from urllib.error import HTTPError
 from research_core import block, complete_blocks, read_manifest, signature
 from research_store import Store
 
@@ -11,6 +12,15 @@ PARENT = "40efc83b-0e47-81a3-955c-ed432a99b823"
 def main():
     # No production source reads, arbitrary destinations, assets or holdings.
     store = Store(os.environ["NOTION_API_KEY"], DESTINATION, sandbox_parent=PARENT)
+    original_transport = store.http
+    def diagnostic_transport(method, path, body):
+        try:
+            return original_transport(method, path, body)
+        except HTTPError as exc:
+            print(json.dumps({"sandbox_http_status": exc.code}), flush=True)
+            raise
+    store.transport = diagnostic_transport
+    print("sandbox: verify destination", flush=True)
     store.check_destination()
     title = "Synthetic Store contract v1 [sandbox-only]"
     key = "sandbox:store-contract:v1"
@@ -19,9 +29,11 @@ def main():
          block("日本語・長文の本文読戻し確認。" * 160)],
         {"key": key, "stream": "news", "categories": ["新潟"],
          "degraded": False, "article_ids": []})
+    print("sandbox: save and readback", flush=True)
     first = store.save(title, key, "2026-11-05", blocks, "news")
     if first not in {"created", "already_exists"}:
         raise RuntimeError("Unexpected initial result")
+    print("sandbox: idempotency", flush=True)
     if store.save(title, key, "2026-11-05", blocks, "news") != "already_exists":
         raise RuntimeError("Idempotency failed")
     rows = store.query(DESTINATION, {"property": "名前", "title": {"equals": title}})
