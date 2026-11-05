@@ -1,3 +1,16 @@
+# Ownership update — 2026-11-05 JST
+
+General-news publication is now owned solely by PR #7 / fix/news-delivery-resilience.
+This branch rejects news --publish even on enabled main, and research_news.yml
+is read-only comparison only. Do NOT merge this original mixed-scope PR as a
+second rollout. Its investment/shared components are preserved for Investment
+Work to reconcile with PR #5. No new holdings reader is authorized.
+
+Common handoff: Notion operations hub 40cfc83b0e47819cadb8f46531a3fd49 and
+PR #7 docs/work-ownership.md. Read current PRs and records before shared changes.
+Original staged design and validation history follow; historical news cutover
+instructions below are superseded by PR #7 and must NOT be activated.
+
 # Separate research: staging and cutover record
 
 Status: draft, NOT enabled for production. Updated 2026-11-05 JST.
@@ -52,3 +65,4 @@ Only after the release gates are resolved:
 
 ## Rollback proposal
 Keep production untouched during staging. For an approved future cutover, record the exact previous workflow/code revisions and changed variables. If new delivery fails, disable only the newly approved schedules/publish gate, preserve reports and manifests, and restore the agreed old delivery configuration under the approved rollback scope. Do not run old and new publishers for the same target day. Validate read-only health before restoring writes.
+

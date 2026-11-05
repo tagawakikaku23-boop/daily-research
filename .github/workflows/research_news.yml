@@ -1,24 +1,20 @@
-name: General news (manual staging)
-# Production schedule is deliberately not enabled before approval.
-# Approved target UTC: 0 22 * * * (JST daily 07:00)
+name: Archived news prototype (read-only comparison)
+# General-news publication is managed ONLY by PR #7 / daily_report.yml.
+# Kept to preserve staged evidence. No schedule and no publish input.
 on:
   workflow_dispatch:
     inputs:
-      publish:
-        type: boolean
-        default: false
-        description: 'Production write requires main and RESEARCH_PUBLISH_ENABLED=true'
       report_date:
         type: string
         required: true
-        description: 'Required JST YYYY-MM-DD; reuse the same date on retry; within 48 hours'
+        description: 'JST YYYY-MM-DD for read-only comparison; within 48 hours'
 permissions:
   contents: read
 concurrency:
-  group: research-news
+  group: research-news-comparison
   cancel-in-progress: false
 jobs:
-  research:
+  comparison:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -29,20 +25,10 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install requests feedparser groq
-      - name: Run independent report
+      - name: Read-only legacy prototype comparison
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          RESEARCH_PUBLISH_ENABLED: ${{ vars.RESEARCH_PUBLISH_ENABLED }}
-          PUBLISH: ${{ inputs.publish }}
           REPORT_DATE: ${{ inputs.report_date }}
         shell: bash
-        run: |
-          args=("news")
-          if [ -n "$REPORT_DATE" ]; then args+=(--date "$REPORT_DATE"); fi
-          if [ "$PUBLISH" = "true" ]; then args+=(--publish); fi
-          python research_run.py "${args[@]}"
-      - name: Failure summary
-        if: failure()
-        run: echo 'Research failed or is incomplete. Review the run and private Notion report. No financial data is included in this log.' >> "$GITHUB_STEP_SUMMARY"
-
+        run: python research_run.py news --date "$REPORT_DATE"

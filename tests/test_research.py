@@ -15,6 +15,14 @@ PAGE = "00000000-0000-0000-0000-000000000002"
 
 
 class CoreTests(unittest.TestCase):
+    def test_superseded_news_publisher_cannot_write_even_on_enabled_main(self):
+        from research_run import run
+        with patch.dict("os.environ", {"GITHUB_REF": "refs/heads/main", "RESEARCH_PUBLISH_ENABLED": "true"}):
+            with patch("research_run.Store") as client:
+                with self.assertRaisesRegex(ValueError, "PR #7"):
+                    run("news", NOW, "2026-11-04", write=True)
+                client.assert_not_called()
+
     def test_publication_requires_date_before_any_api_access(self):
         from research_run import run
         with patch.dict("os.environ", {"GITHUB_REF": "refs/heads/main", "RESEARCH_PUBLISH_ENABLED": "true"}):
@@ -292,5 +300,6 @@ class StoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

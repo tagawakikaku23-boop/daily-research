@@ -21,6 +21,8 @@ DESTINATIONS = {"news": "30df8385-7101-4e54-a000-a281e6546b1d",
 def run(stream, now, report_date=None, write=False):
     if write and not report_date:
         raise ValueError("Publication requires an explicit report date; retries must keep the same target")
+    if stream == "news" and write:
+        raise ValueError("General news publication is owned by PR #7; this staged publisher is disabled")
     if write and (os.environ.get("RESEARCH_PUBLISH_ENABLED") != "true" or
                   os.environ.get("GITHUB_REF") != "refs/heads/main"):
         raise ValueError("Production publication is not enabled")
@@ -73,5 +75,6 @@ if __name__ == "__main__":
         run(args.stream, datetime.now(JST), args.date, args.publish)
     except Exception:
         raise SystemExit("Research failed or degraded. Inspect private report; raw details suppressed.")
+
 
 
