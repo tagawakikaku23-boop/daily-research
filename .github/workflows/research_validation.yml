@@ -1,0 +1,56 @@
+name: Separate research validation
+on:
+  pull_request:
+    paths: ['research_*.py', 'investment_analysis.py', 'tests/test_research.py', '.github/workflows/research_validation.yml']
+  push:
+    branches: [codex/separate-news-investment]
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m unittest discover -s tests -v
+      - run: python -m compileall -q research_core.py research_store.py research_sources.py research_quote.py research_briefing.py research_run.py
+  public-sources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests feedparser yfinance jpholiday
+      - name: Public sources only, no Notion credentials
+        run: python research_smoke.py
+
+
+  sandbox-store:
+    # Never run secret-bearing integration on PR events or another branch.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/separate-news-investment'
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: research-sandbox-store
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Synthetic sandbox write and full readback
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+        run: python research_integration.py

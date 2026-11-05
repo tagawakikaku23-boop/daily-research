@@ -1,0 +1,34 @@
+name: Archived news prototype (read-only comparison)
+# General-news publication is managed ONLY by PR #7 / daily_report.yml.
+# Kept to preserve staged evidence. No schedule and no publish input.
+on:
+  workflow_dispatch:
+    inputs:
+      report_date:
+        type: string
+        required: true
+        description: 'JST YYYY-MM-DD for read-only comparison; within 48 hours'
+permissions:
+  contents: read
+concurrency:
+  group: research-news-comparison
+  cancel-in-progress: false
+jobs:
+  comparison:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests feedparser groq
+      - name: Read-only legacy prototype comparison
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          REPORT_DATE: ${{ inputs.report_date }}
+        shell: bash
+        run: python research_run.py news --date "$REPORT_DATE"
