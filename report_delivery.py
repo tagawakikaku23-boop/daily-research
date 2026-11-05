@@ -52,6 +52,8 @@ def find_existing(requests, headers, db_id, parent_id, title, icon, kinds):
                     ("ニュースダイジェスト", "📰"), ("今週の買い場チェック", "🛒"))
                     if term in name), "")
             if report_slot(name, row_icon) == slot:
+                if icon == "📰" and (row.get("icon") or {}).get("emoji") == "⚠️":
+                    raise RuntimeError("同じ回のニュースは部分失敗です。既存ページを確認してください。自動再投稿はしません。")
                 if (row.get("icon") or {}).get("emoji") == "⏳":
                     raise RuntimeError("同じ回の投稿が未完了です。Notionの作成中ページを確認してください。")
                 return row.get("url") or "https://www.notion.so/" + row["id"].replace("-", "")
@@ -60,7 +62,7 @@ def find_existing(requests, headers, db_id, parent_id, title, icon, kinds):
         cursor = result["next_cursor"]
 
 
-def publish(requests, headers, data, blocks):
+def publish(requests, headers, data, blocks, completion_icon=None):
     # A timeout/5xx on POST can mean the page was created. Never retry blindly.
     pending = dict(data, icon={"type": "emoji", "emoji": "⏳"})
     resp = requests.post("https://api.notion.com/v1/pages", headers=headers,
@@ -73,7 +75,9 @@ def publish(requests, headers, data, blocks):
                                   timeout=60)
         appended.raise_for_status()
     completed = requests.patch(f"https://api.notion.com/v1/pages/{page['id']}",
-                               headers=headers, json={"icon": data["icon"]}, timeout=30)
+                               headers=headers, json={"icon": ({"type": "emoji", "emoji": completion_icon}
+                                                            if completion_icon else data["icon"])}, timeout=30)
     completed.raise_for_status()
     return page.get("url", "")
+
 

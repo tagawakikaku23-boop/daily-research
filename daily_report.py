@@ -1151,8 +1151,9 @@ def generate_news_digest(all_news_text):
             max_tokens=3000,
         )
         return clean_ai_text(response.choices[0].message.content)
-    except Exception as e:
-        return f"ダイジェスト生成失敗: {e}"
+    except Exception:
+        # Provider exceptions may contain request bodies. Keep them private.
+        return "ダイジェスト生成失敗（詳細は非表示）"
 
 # ── フォーマットヘルパー ──────────────────────────
 def format_price(ticker, price):
@@ -1358,7 +1359,7 @@ def existing_report(title, icon):
     return find_existing(requests, headers, NOTION_DB_ID, PARENT_PAGE_ID,
                          title, icon, _ICON_KIND)
 
-def create_page(title, blocks, icon="📋"):
+def create_page(title, blocks, icon="📋", completion_icon=None):
     headers = {
         "Authorization": f"Bearer {NOTION_API_KEY}",
         "Content-Type":  "application/json",
@@ -1390,6 +1391,8 @@ def create_page(title, blocks, icon="📋"):
     if existing:
         print("  投稿済みのためスキップ")
         return existing
+    if completion_icon:
+        return publish(requests, headers, data, blocks, completion_icon=completion_icon)
     return publish(requests, headers, data, blocks)
 
 # ── 夜の「明日の注目＋ひとことメモ」AI生成 ─────────────
@@ -2090,6 +2093,9 @@ def create_news_page(date_str, time_str="", retrieved_at=None):
     if all_news_for_digest:
         print("  AIダイジェスト生成中...")
         digest = generate_news_digest("\n".join(all_news_for_digest))
+        if not isinstance(digest, str) or not digest.strip() or digest.startswith("ダイジェスト生成失敗"):
+            source_failures.append("AI要約")
+            digest = "AI要約を取得できませんでした。以下の出典付き見出しを確認してください。"
         blocks.append(h2("🗞️ 今日のダイジェスト（AI要約・未検証）"))
         blocks.extend(long_callout(digest, "🗞️", "purple_background"))
         blocks.append(divider())
@@ -2131,6 +2137,11 @@ def create_news_page(date_str, time_str="", retrieved_at=None):
     blocks.append(para("RSSは公開日時を確認できる直近3日以内の記事を使用。更新日時だけの記事は採用しません。新聞見出しの公開日時は未確認。配信枠の時点を再現した記事一覧ではなく、上記取得開始時刻に取得した内容です。"))
 
     title = f"{date_str} {time_str} ニュースダイジェスト".replace("  ", " ").strip()
+    if source_failures:
+        blocks.insert(0, para("配信状態：部分失敗。取得できた見出しは保存しました。失敗範囲：" +
+                              " / ".join(source_failures) + "。既存本文の自動上書き・再投稿は行いません。"))
+        create_page(title, blocks, "📰", completion_icon="⚠️")
+        raise RuntimeError("ニュースを部分失敗として保存しました。既存ページを確認してください。")
     url = create_page(title, blocks, "📰")
     print(f"ニュースページ完了: {url}")
     return url
@@ -2405,6 +2416,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
