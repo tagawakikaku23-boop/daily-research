@@ -2056,12 +2056,9 @@ def create_news_page(date_str, time_str="", retrieved_at=None):
     category_news = {}
     category_status = {}
     source_failures = []
-    news_feeds = dict(NEWS_FEEDS)
-    # Reuse PR #6 public search queries, only on the general-news path.
-    from urllib.parse import quote
-    from news_content import EXTRA_NEWS_QUERIES
-    for category, query in EXTRA_NEWS_QUERIES.items():
-        news_feeds[category] = ["https://news.google.com/rss/search?q=" + quote(query) + "&hl=ja&gl=JP&ceid=JP:ja"]
+    # Shared public configuration; never used by stock/portfolio routing.
+    from news_content import general_news_feeds
+    news_feeds = general_news_feeds(NEWS_FEEDS)
     for category, urls in news_feeds.items():
         print(f"  {category}...")
         fetched = get_rss_news(urls, max_items=10)

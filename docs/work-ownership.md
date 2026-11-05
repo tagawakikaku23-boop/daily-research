@@ -25,7 +25,7 @@ Current investment impact: daily_report.py contains the news-only entrypoint, RS
 
 ## Current validation and unresolved gates
 
-- PR #7: 58 tests pass locally; mock collection-to-save is NOT live Notion verification.
+- PR #7: 59 tests pass locally; mock collection-to-save is NOT live Notion verification.
 - PR #6: previous Python sandbox check failed before saving with HTTP 404; connector visibility is not proof of API visibility. Reuse the existing sandbox; do not create another one.
 - Real news API save/full readback, actual AI summary quality, source login and scheduled delivery remain unverified.
 - Cross-edition article suppression, persisted source-health/recovery state and notification delivery still need work. Same story may appear in morning and evening; report identity still prevents duplicate posts within an edition.

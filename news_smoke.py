@@ -2,8 +2,7 @@
 import ast
 import json
 from pathlib import Path
-from urllib.parse import quote
-from news_content import collect_rss, EXTRA_NEWS_QUERIES
+from news_content import collect_rss, general_news_feeds
 
 
 def main():
@@ -15,9 +14,7 @@ def main():
              and any(isinstance(t, ast.Name) and t.id == "NEWS_FEEDS" for t in n.targets)]
     if len(nodes) != 1:
         raise ValueError("Expected exactly one public feed configuration")
-    feeds = ast.literal_eval(nodes[0].value)
-    for category, query in EXTRA_NEWS_QUERIES.items():
-        feeds[category] = ["https://news.google.com/rss/search?q=" + quote(query) + "&hl=ja&gl=JP&ceid=JP:ja"]
+    feeds = general_news_feeds(ast.literal_eval(nodes[0].value))
     total = 0
     with requests.Session() as session:
         for category, urls in feeds.items():

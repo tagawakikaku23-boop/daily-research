@@ -79,7 +79,7 @@ still untested. Manual morning/evening news publication now requires an explicit
 JST report_date, preserving the retry identity; stock jobs keep their prior
 manual behavior unless a report_date selects news-only retry.
 
-Validation: 58 local tests and syntax checks pass. Added tests cover publication
+Validation: 59 local tests and syntax checks pass. Added tests cover publication
 vs update time, unsafe URLs, source/retrieval metadata in actual block rendering,
 partial source failure vs valid empty feeds, and missing manual target date.
 These do not establish live Notion save or full provider/AI quality.
@@ -90,3 +90,11 @@ alignment remain a single future approval decision; this PR does not authorize
 production activation. Cross-edition article history, repair state and delivery
 notifications remain open. The prior PR #6 sandbox 404 is unresolved; no additional
 sandbox or holdings reader is created here.
+
+Public smoke at f17e06e / run 41947999508 accepted 22 items, but Japanese economy
+and telecom primary feeds had no eligible publication-dated articles. Follow-up
+adds named Google News supplements for these categories while retaining the
+primary feeds. This is search-based coverage with original URLs unconfirmed,
+not evidence that those primary feeds are healthy/current. HTTP 200 non-feed
+content is now a failure (requires a recognized feed version), distinct from a
+valid empty RSS. Final-head CI must confirm the supplemental collection.

@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest import TestCase
 from unittest.mock import Mock, patch
 from news_delivery import JST, news_slot, route
-from news_content import article_key, fresh_entry, canonical_url, collect_rss
+from news_content import article_key, fresh_entry, canonical_url, collect_rss, general_news_feeds
 from test_delivery import extract
 
 class NewsSlotTests(TestCase):
@@ -93,6 +93,14 @@ class NewsBoundaryTests(TestCase):
         self.assertEqual(text.count("cron:"), 3)
 
 class NewsArticleTests(TestCase):
+    def test_public_supplements_preserve_original_config_and_named_categories(self):
+        original = {"📰 日本経済": ["https://example.com/primary"]}
+        result = general_news_feeds(original)
+        self.assertEqual(original, {"📰 日本経済": ["https://example.com/primary"]})
+        self.assertEqual(result["📰 日本経済"][0], original["📰 日本経済"][0])
+        self.assertIn("金融・金利・為替", result)
+        self.assertIn("中小企業・M&A・事業承継", result)
+
     def test_update_time_never_replaces_publication_time(self):
         now = datetime(2026, 11, 5, 10, tzinfo=JST)
         self.assertFalse(fresh_entry({"updated": now.isoformat()}, now))
@@ -115,7 +123,7 @@ class NewsArticleTests(TestCase):
                     "link": "https://news.google.com/rss/articles/test?utm_source=two"},
                    {"title": "Unsafe headline", "published": now.isoformat(), "link": "javascript:alert(1)"}]
         parser = Mock()
-        parser.parse.return_value = Feed(entries=entries)
+        parser.parse.return_value = Feed(entries=entries, version="rss20")
         response = Mock(content=b"rss")
         fetch = Mock(side_effect=[TimeoutError(), response])
         items = collect_rss(["https://example.com/fail", "https://example.com/rss"], fetch, parser, now)
@@ -137,11 +145,14 @@ class NewsArticleTests(TestCase):
             def entries(self):
                 return []
         parser = Mock()
-        parser.parse.return_value = Feed()
+        parser.parse.return_value = Feed(version="rss20")
         empty = collect_rss(["https://example.com/rss"], Mock(return_value=Mock(content=b"rss")), parser)
         failed = collect_rss(["https://example.com/rss"], Mock(side_effect=TimeoutError()), parser)
         self.assertEqual((empty.completed_feeds, empty.failed_feeds), (1, 0))
         self.assertEqual((failed.completed_feeds, failed.failed_feeds), (0, 1))
+        parser.parse.return_value = Feed()  # HTTP 200 HTML is not a valid empty RSS.
+        invalid = collect_rss(["https://example.com/html"], Mock(return_value=Mock(content=b"html")), parser)
+        self.assertEqual((invalid.completed_feeds, invalid.failed_feeds), (0, 1))
 
     def test_tracking_urls_are_same_article(self):
         self.assertEqual(article_key("a", "https://example.com/a?id=1&utm_source=x#top"),

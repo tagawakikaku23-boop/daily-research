@@ -1,12 +1,22 @@
 """Public news identity and freshness checks; no private data access."""
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
-from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode, quote
 
 EXTRA_NEWS_QUERIES = {
     "金融・金利・為替": "日本銀行 金利 為替",
     "中小企業・M&A・事業承継": "中小企業 M&A 事業承継",
 }
+
+def general_news_feeds(existing):
+    """Named additions, not dictionary-position mapping; preserve primary feeds."""
+    feeds = {name: list(urls) for name, urls in existing.items()}
+    queries = {"📰 日本経済": "日本 経済", "📱 携帯キャリア・ガジェット": "携帯 通信 キャリア 料金",
+               **EXTRA_NEWS_QUERIES}
+    for category, query in queries.items():
+        url = "https://news.google.com/rss/search?q=" + quote(query) + "&hl=ja&gl=JP&ceid=JP:ja"
+        feeds.setdefault(category, []).append(url)
+    return feeds
 
 # Reused from PR #6 research_core (1ef3d12); this is the news route's
 # canonical URL/publication contract. No portfolio configuration is imported.
@@ -63,7 +73,7 @@ def collect_rss(urls, fetch, parser, now=None, max_items=5):
             if len(response.content) > 2000000:
                 raise ValueError("Feed too large")
             feed = parser.parse(response.content)
-            if not feed.entries and feed.get("bozo"):
+            if not feed.get("version") or (not feed.entries and feed.get("bozo")):
                 raise ValueError("Invalid RSS")
             completed += 1
             for entry in feed.entries:
