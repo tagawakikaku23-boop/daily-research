@@ -15,6 +15,10 @@ on:
         type: choice
         options: [check, morning, evening, manual, weekly]
         default: check
+      report_date:
+        description: 'ニュース再実行の対象日（JST YYYY-MM-DD、36時間以内）'
+        type: string
+        required: false
       action:
         description: 'post はPC側タスクを無効化してから選ぶ'
         type: choice
@@ -23,6 +27,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: daily-report
@@ -31,10 +36,11 @@ concurrency:
 jobs:
   run-report:
     # 旧PC停止確認済み。配信設定と緊急停止は共通ルーターで判定する。
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    if: (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main') && !inputs.report_date
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
+      REPORT_COMPONENT: stock
       NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       NOTION_PAGE_ID: ${{ secrets.NOTION_PAGE_ID }}
@@ -85,4 +91,49 @@ jobs:
       - name: 前回データをNotionだけに保存
         if: always() && steps.state.outcome == 'success'
         run: python state_sync.py push
+
+
+  news:
+    # Independent job: no needs, stock imports, state sync or holdings query.
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: ニュースの配信枠を確定
+        id: news
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          INPUT_MODE: ${{ inputs.mode }}
+          INPUT_ACTION: ${{ inputs.action }}
+          REPORT_DATE: ${{ inputs.report_date }}
+          CLOUD_REPORTS_ENABLED: ${{ vars.CLOUD_REPORTS_ENABLED }}
+        run: python news_delivery.py
+      - name: ニュース用パッケージ
+        if: steps.news.outputs.post == 'true'
+        run: |
+          pip install yfinance feedparser requests groq beautifulsoup4 playwright jpholiday
+          playwright install chromium --with-deps
+      - name: 株式から独立したニュース保存
+        if: steps.news.outputs.post == 'true'
+        env:
+          REPORT_COMPONENT: news
+          NEWS_DATE: ${{ steps.news.outputs.date }}
+          NEWS_EDITION: ${{ steps.news.outputs.edition }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_PAGE_ID: ${{ secrets.NOTION_PAGE_ID }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          NOTION_DB_ID: ${{ vars.NOTION_DB_ID || '37afc83b-0e47-81d4-901d-d20a958122e0' }}
+          NIKKEI_EMAIL: ${{ secrets.NIKKEI_EMAIL }}
+          NIKKEI_PASSWORD: ${{ secrets.NIKKEI_PASSWORD }}
+          NIIGATA_NIPPO_EMAIL: ${{ secrets.NIIGATA_NIPPO_EMAIL }}
+          NIIGATA_NIPPO_PASSWORD: ${{ secrets.NIIGATA_NIPPO_PASSWORD }}
+        run: python run_private.py daily_report.py
 
