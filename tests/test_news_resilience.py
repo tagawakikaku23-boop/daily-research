@@ -5,10 +5,16 @@ from pathlib import Path
 from unittest import TestCase
 from unittest.mock import Mock, patch
 from news_delivery import JST, news_slot, route
-from news_content import article_key, fresh_entry
+from news_content import article_key, fresh_entry, canonical_url, collect_rss
 from test_delivery import extract
 
 class NewsSlotTests(TestCase):
+    def test_manual_publication_requires_target_date(self):
+        now = datetime(2026, 11, 5, 10, tzinfo=JST)
+        with self.assertRaisesRegex(ValueError, "explicit JST"):
+            route({"enabled": True}, "workflow_dispatch", "", "morning", "post",
+                  "", "refs/heads/main", now, now)
+
     def test_evening_after_midnight_keeps_previous_day(self):
         created = datetime(2026, 11, 5, 2, 51, tzinfo=JST)
         slot = news_slot("evening", created, created)
@@ -87,6 +93,56 @@ class NewsBoundaryTests(TestCase):
         self.assertEqual(text.count("cron:"), 3)
 
 class NewsArticleTests(TestCase):
+    def test_update_time_never_replaces_publication_time(self):
+        now = datetime(2026, 11, 5, 10, tzinfo=JST)
+        self.assertFalse(fresh_entry({"updated": now.isoformat()}, now))
+        self.assertFalse(fresh_entry({"published": (now-timedelta(days=4)).isoformat(),
+                                     "updated": now.isoformat()}, now))
+
+    def test_unsafe_urls_are_rejected(self):
+        for url in [None, "javascript:alert(1)", "https://user:password@example.com/a", "https://example.com:22/a"]:
+            self.assertIsNone(canonical_url(url))
+
+    def test_rss_metadata_and_partial_failure_are_retained(self):
+        now = datetime(2026, 11, 5, 10, tzinfo=JST)
+        class Feed(dict):
+            @property
+            def entries(self):
+                return self["entries"]
+        entries = [{"title": "Economic headline", "published": now.isoformat(),
+                    "link": "https://news.google.com/rss/articles/test?utm_source=one", "source": {"title": "Publisher"}},
+                   {"title": "Economic headline", "published": now.isoformat(),
+                    "link": "https://news.google.com/rss/articles/test?utm_source=two"},
+                   {"title": "Unsafe headline", "published": now.isoformat(), "link": "javascript:alert(1)"}]
+        parser = Mock()
+        parser.parse.return_value = Feed(entries=entries)
+        response = Mock(content=b"rss")
+        fetch = Mock(side_effect=[TimeoutError(), response])
+        items = collect_rss(["https://example.com/fail", "https://example.com/rss"], fetch, parser, now)
+        self.assertEqual((len(items), items.completed_feeds, items.failed_feeds), (1, 1, 1))
+        title, url = items[0]
+        self.assertEqual(title.published_at, now.isoformat())
+        self.assertEqual(title.source, "Publisher")
+        self.assertIn("原文URL未確認", title.url_kind)
+        self.assertNotIn("utm_", url)
+        self.assertEqual(fetch.call_args.kwargs["timeout"], (5, 20))
+        rendered = extract("bul")["bul"](title, url)
+        text = rendered["bulleted_list_item"]["rich_text"][0]["text"]["content"]
+        self.assertIn("公開: " + now.isoformat(), text)
+        self.assertIn("出典: Publisher", text)
+
+    def test_valid_empty_feed_is_distinct_from_all_failed(self):
+        class Feed(dict):
+            @property
+            def entries(self):
+                return []
+        parser = Mock()
+        parser.parse.return_value = Feed()
+        empty = collect_rss(["https://example.com/rss"], Mock(return_value=Mock(content=b"rss")), parser)
+        failed = collect_rss(["https://example.com/rss"], Mock(side_effect=TimeoutError()), parser)
+        self.assertEqual((empty.completed_feeds, empty.failed_feeds), (1, 0))
+        self.assertEqual((failed.completed_feeds, failed.failed_feeds), (0, 1))
+
     def test_tracking_urls_are_same_article(self):
         self.assertEqual(article_key("a", "https://example.com/a?id=1&utm_source=x#top"),
                          article_key("b", "https://example.com/a?utm_source=y&id=1"))
@@ -130,3 +186,4 @@ class NewsPipelineTests(TestCase):
         self.assertEqual(ns["create_news_page"]("2026-11-04", "19:00"), "existing")
         ns["get_rss_news"].assert_not_called()
         saved.assert_not_called()
+

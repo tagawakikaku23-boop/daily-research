@@ -54,3 +54,39 @@ Revert this PR commit through a new revert PR, then restore the previous setting
 after review. Do not delete Notion reports or state, or reactivate PC schedules.
 Reverting restores the pre-existing delay failure, so keep the limitation visible.
 
+
+
+## Ownership consolidation and public-source follow-up (2026-11-05 JST)
+PR #7 is the ONLY proposed general-news publication route. See
+[work-ownership.md](work-ownership.md) before any shared change or restart.
+PR #6 news publication is disabled in its staging branch; its investment code
+remains an investment-owner handoff. Do not enable or merge both routes as-is.
+The existing production workflows and schedules have NOT changed.
+
+Reused PR #6 URL normalization and publication-time contract in news_content.py:
+reject credential-bearing/non-web/nonstandard-port links, strip tracking, reject
+articles with only update timestamps, and retain publication/retrieval/source
+metadata in string-compatible RSS headlines. Google News links are explicitly
+marked original-URL-unconfirmed. HTTP collection has bounded connect/read
+timeouts and a feed-size limit. Partial feed failures are displayed separately
+from no eligible unpublished items. If the entire collection has no items, do
+not publish. No previous report is reused as current data.
+
+Added financial/rates/FX and SME/M&A/succession queries on the NEWS path only.
+The general-news prompt excludes personal buy/sell analysis and unsupported
+background claims; its output is labeled unverified. Actual model quality is
+still untested. Manual morning/evening news publication now requires an explicit
+JST report_date, preserving the retry identity; stock jobs keep their prior
+manual behavior unless a report_date selects news-only retry.
+
+Validation: 58 local tests and syntax checks pass. Added tests cover publication
+vs update time, unsafe URLs, source/retrieval metadata in actual block rendering,
+partial source failure vs valid empty feeds, and missing manual target date.
+These do not establish live Notion save or full provider/AI quality.
+
+Legacy matching/destination and current morning/evening identity are preserved.
+The requested daily 07:00 cadence, any evening/weekly change and operations-health
+alignment remain a single future approval decision; this PR does not authorize
+production activation. Cross-edition article history, repair state and delivery
+notifications remain open. The prior PR #6 sandbox 404 is unresolved; no additional
+sandbox or holdings reader is created here.

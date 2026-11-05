@@ -29,6 +29,8 @@ def route(config, event, schedule, mode, action, override, ref, created_at, now,
         if mode not in {"morning", "evening"} or action != "post" or override.lower() == "false":
             return None
         edition = mode
+        if not requested_date:
+            raise ValueError("Manual news publication requires an explicit JST report date")
     else:
         # Activation pushes remain on the legacy route until explicitly reviewed.
         return None
@@ -63,4 +65,5 @@ if __name__ == "__main__":
         main()
     except Exception:
         raise SystemExit("News routing failed; no publication attempted.")
+
 
