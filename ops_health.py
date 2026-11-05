@@ -48,6 +48,8 @@ def completed_editions(rows):
         elif kind == "🌙 夜":
             found.add("evening")
         elif kind == "📰 ニュース":
+            if (row.get("icon") or {}).get("emoji") == "⚠️":
+                continue  # Partial collection/AI failure is not complete delivery.
             title = "".join(x.get("plain_text", x.get("text", {}).get("content", ""))
                             for x in props.get("名前", {}).get("title", []))
             match = re.search(r"\b(\d{2}):\d{2}\b", title)
@@ -152,4 +154,5 @@ if __name__ == "__main__":
     except Exception:
         print("::error::点検自体が失敗しました。秘密値と応答本文は表示しません。")
         sys.exit(1)
+
 
