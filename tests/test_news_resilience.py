@@ -170,7 +170,7 @@ class NewsPipelineTests(TestCase):
         saved = Mock(return_value="saved")
         ns = extract("create_news_page", existing_report=Mock(return_value=None),
                      get_nikkei_news=Mock(return_value=[]), get_niigata_nippo_news=Mock(return_value=[]),
-                     NEWS_FEEDS={"one": ["https://example.com"]}, get_rss_news=Mock(return_value=items),
+                     NEWS_FEEDS={"日本経済": ["https://example.com"]}, get_rss_news=Mock(return_value=items),
                      generate_news_digest=Mock(return_value="summary"), create_page=saved,
                      os=os, print=Mock(), freshness_note=Mock(return_value={}))
         for name in ["callout_rt", "rt", "h2", "divider", "toggle", "para", "bul"]:
@@ -183,7 +183,7 @@ class NewsPipelineTests(TestCase):
                                        ("headline one", "https://example.com/a?utm_source=two")])
         self.assertEqual(ns["create_news_page"]("2026-11-04", "19:00", "2026-11-05T02:51+09:00"), "saved")
         self.assertEqual(saved.call_args.args[0], "2026-11-04 19:00 ニュースダイジェスト")
-        ns["generate_news_digest"].assert_called_once_with("社会・その他: headline one / 出典:  / https://example.com/a?utm_source=one")
+        ns["generate_news_digest"].assert_called_once_with("日本経済: headline one / 出典:  / https://example.com/a?utm_source=one")
 
     def test_empty_fetch_does_not_publish_or_use_cached_news(self):
         ns, saved = self.setup_runner([])
