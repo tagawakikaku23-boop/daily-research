@@ -42,8 +42,8 @@ def day(value):
     return date.fromisoformat(clean(value).replace("/", "-")).isoformat()
 
 
-def read_rows(path, delimiter):
-    with path.open(encoding="utf-8-sig", newline="") as file:
+def read_rows(path, delimiter, encoding="utf-8-sig"):
+    with path.open(encoding=encoding, newline="") as file:
         reader = csv.reader(file, delimiter=delimiter, strict=True)
         headers = [clean(x) for x in next(reader, [])]
         if not headers or "" in headers or len(headers) != len(set(headers)):
@@ -141,17 +141,44 @@ def group_holdings(rows):
     return result
 
 
+def project_holdings(incoming, existing):
+    """Apply proposed changes in memory, retaining accounts absent from the file."""
+    projected = {row["key"]: row for row in existing}
+    if len(projected) != len(existing):
+        raise ValueError("既存保有明細のキーが重複")
+    for row in incoming:
+        if row["status"] in {"追加", "変更", "変更なし"}:
+            projected[row["key"]] = row
+    grouped = group_holdings([
+        {**row, "security": key.split("|", 2)[2], "status": "変更なし"}
+        for key, row in projected.items()
+    ])
+    for row in incoming:
+        if row["status"] == "保留" and row.get("security") in grouped:
+            group = grouped[row["security"]]
+            group.update({"株数": None, "基準日": None})
+    return grouped
+
+
 def main():
     parser = argparse.ArgumentParser(description="ローカル取込差分確認。Notionへの書込みなし")
     parser.add_argument("kind", choices=("assets", "holdings"))
     parser.add_argument("input", type=Path)
     parser.add_argument("--existing", type=Path, help="正規化済み既存行のJSON配列")
+    parser.add_argument("--headers-only", action="store_true", help="先頭行の列名だけ確認")
+    parser.add_argument("--encoding", choices=("utf-8-sig", "cp932"), default="utf-8-sig")
     args = parser.parse_args()
+    delimiter = "," if args.kind == "assets" else "\t"
+    if args.headers_only:
+        with args.input.open(encoding=args.encoding, newline="") as file:
+            headers = [clean(value) for value in next(csv.reader(file, delimiter=delimiter), [])]
+        print(json.dumps({"headers": headers}, ensure_ascii=True, indent=2))
+        return
     existing = (json.loads(args.existing.read_text(encoding="utf-8-sig"))
                 if args.existing else [])
     convert = assets if args.kind == "assets" else holding
     incoming = []
-    for line, raw in read_rows(args.input, "," if args.kind == "assets" else "\t"):
+    for line, raw in read_rows(args.input, delimiter, args.encoding):
         try:
             if raw is None:
                 raise ValueError("列数がヘッダーと一致しない")
@@ -161,7 +188,9 @@ def main():
     output = {"rows": preview(incoming, existing, args.kind),
               "comparison": "既存行と比較" if args.existing else "既存行未指定の仮判定"}
     if args.kind == "holdings":
-        output["入力分のみの銘柄合算"] = group_holdings(incoming)
+        grouped = project_holdings(incoming, existing)
+        output["反映後の銘柄合算案" if args.existing else "入力分のみの銘柄合算"] = grouped
+        output["株価・配当・ニュースの共通取得キー候補"] = sorted(grouped)
     print(json.dumps(output, ensure_ascii=True, indent=2))
 
 
