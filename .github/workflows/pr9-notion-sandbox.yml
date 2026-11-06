@@ -1,0 +1,52 @@
+name: PR 9 isolated Notion access check
+on:
+  push:
+    branches: [test/pr9-notion-sandbox]
+permissions:
+  contents: read
+jobs:
+  sandbox-access:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read-only sandbox probe
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from urllib.error import HTTPError
+          from urllib.request import Request, urlopen
+
+          database = "2d02e561-476b-4b1d-8125-809494d17c03"
+          source = "a640a25d-b831-4034-82d0-01f6cc9d6330"
+          key = os.environ.get("NOTION_API_KEY")
+          if not key:
+              raise SystemExit("Missing NOTION_API_KEY")
+          ok = True
+          for name, path, version in (
+              ("token identity", "users/me", "2025-09-03"),
+              ("legacy database", "databases/" + database, "2022-06-28"),
+              ("modern database", "databases/" + database, "2025-09-03"),
+              ("modern data source", "data_sources/" + source, "2025-09-03"),
+          ):
+              req = Request("https://api.notion.com/v1/" + path, headers={
+                  "Authorization": "Bearer " + key, "Notion-Version": version,
+              })
+              try:
+                  with urlopen(req, timeout=20) as response:
+                      result = json.load(response)
+                  print(name + ": HTTP 200")
+                  if name == "modern database":
+                      match = source in {item["id"] for item in result.get("data_sources", [])}
+                      print("Data source matches sandbox database: " + str(match))
+                      ok = ok and match
+              except HTTPError as error:
+                  print(f"{name}: HTTP {error.code}")
+                  ok = False
+              except Exception:
+                  print(name + ": request failed")
+                  ok = False
+          raise SystemExit(0 if ok else 1)
+          PY
