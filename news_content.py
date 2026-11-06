@@ -1,22 +1,80 @@
 """Public news identity and freshness checks; no private data access."""
+import re
+import unicodedata
+from collections import Counter
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode, quote
 
-EXTRA_NEWS_QUERIES = {
-    "金融・金利・為替": "日本銀行 金利 為替",
-    "中小企業・M&A・事業承継": "中小企業 M&A 事業承継",
+CATEGORIES = (
+    "日本経済", "世界経済", "金融・マーケット", "新潟", "企業・M&A",
+    "通信・IT", "AI・テクノロジー", "社会・その他",
+)
+QUERIES = (
+    "日本 GDP OR 景気 OR 賃金", "世界経済 OR 世界貿易", "金利 OR 為替 OR 日銀",
+    "新潟", "M&A OR 事業承継 OR 買収", "通信 OR 携帯 OR IT",
+    "生成AI OR 半導体 OR ロボット", "社会 OR 防災 OR 教育",
+)
+LEGACY = {
+    "📰 日本経済": "日本経済", "🌐 世界経済": "社会・その他",
+    "💻 IT・テクノロジー": "通信・IT", "📱 携帯キャリア・ガジェット": "通信・IT",
+    "🌾 新潟・地域経済": "新潟",
 }
+TOPICS = (
+    ("新潟", r"新潟|長岡市|佐渡|上越市"),
+    ("企業・M&A", r"ma|事業承継|買収|経営統合|合併"),
+    ("AI・テクノロジー", r"生成ai|人工知能|半導体|ロボット|chatgpt"),
+    ("通信・IT", r"携帯|通信|スマホ|サイバー|クラウド"),
+    ("金融・マーケット", r"金利|為替|日銀|株式市場|国債"),
+)
 
 def general_news_feeds(existing):
-    """Named additions, not dictionary-position mapping; preserve primary feeds."""
-    feeds = {name: list(urls) for name, urls in existing.items()}
-    queries = {"📰 日本経済": "日本 経済", "📱 携帯キャリア・ガジェット": "携帯 通信 キャリア 料金",
-               **EXTRA_NEWS_QUERIES}
-    for category, query in queries.items():
-        url = "https://news.google.com/rss/search?q=" + quote(query) + "&hl=ja&gl=JP&ceid=JP:ja"
-        feeds.setdefault(category, []).append(url)
+    feeds = {category: [] for category in CATEGORIES}
+    for name, urls in existing.items():
+        feeds[LEGACY.get(name, name if name in feeds else "社会・その他")].extend(urls)
+    for category, query in zip(CATEGORIES, QUERIES):
+        feeds[category].append("https://news.google.com/rss/search?q=" + quote(query)
+                               + "&hl=ja&gl=JP&ceid=JP:ja")
     return feeds
+
+def headline_key(headline):
+    title = unicodedata.normalize("NFKC", str(headline)).casefold()
+    source = getattr(headline, "source", "")
+    suffix = " - " + unicodedata.normalize("NFKC", source).casefold()
+    if source and title.endswith(suffix):
+        title = title[:-len(suffix)]
+    return re.sub(r"[\W_]+", "", title)
+
+def classify(headline, fallback):
+    title = headline_key(headline)
+    tags = [category for category, pattern in TOPICS
+            if re.search(pattern, title)]
+    primary = tags[0] if tags else fallback
+    return primary, tuple(category for category in tags if category != primary)
+
+def balance_articles(candidates):
+    """Assign each story once and cap exposure to one publisher."""
+    grouped = {category: [] for category in CATEGORIES}
+    urls, titles, publishers = set(), set(), Counter()
+    ordered = sorted(candidates, key=lambda row: (
+        getattr(row[1], "url_kind", "") == "配信元記事URL",
+        getattr(row[1], "published_at", "")), reverse=True)
+    for fallback, headline, link in ordered:
+        primary, tags = classify(headline, fallback)
+        url, title = canonical_url(link), headline_key(headline)
+        source = getattr(headline, "source", "") or urlsplit(link).hostname or ""
+        publisher = re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", source).casefold())
+        if "nikkei" in publisher or "日経" in publisher:
+            publisher = "nikkei"
+        if not url or url in urls or not title or title in titles:
+            continue
+        if publishers[publisher] >= 3 or len(grouped[primary]) >= 5:
+            continue
+        urls.add(url)
+        titles.add(title)
+        publishers[publisher] += 1
+        grouped[primary].append((headline, link, tags))
+    return grouped
 
 # Reused from PR #6 research_core (1ef3d12); this is the news route's
 # canonical URL/publication contract. No portfolio configuration is imported.

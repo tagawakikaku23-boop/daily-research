@@ -97,9 +97,9 @@ class NewsArticleTests(TestCase):
         original = {"📰 日本経済": ["https://example.com/primary"]}
         result = general_news_feeds(original)
         self.assertEqual(original, {"📰 日本経済": ["https://example.com/primary"]})
-        self.assertEqual(result["📰 日本経済"][0], original["📰 日本経済"][0])
-        self.assertIn("金融・金利・為替", result)
-        self.assertIn("中小企業・M&A・事業承継", result)
+        self.assertEqual(result["日本経済"][0], original["📰 日本経済"][0])
+        self.assertIn("金融・マーケット", result)
+        self.assertIn("企業・M&A", result)
 
     def test_update_time_never_replaces_publication_time(self):
         now = datetime(2026, 11, 5, 10, tzinfo=JST)
@@ -183,7 +183,7 @@ class NewsPipelineTests(TestCase):
                                        ("headline one", "https://example.com/a?utm_source=two")])
         self.assertEqual(ns["create_news_page"]("2026-11-04", "19:00", "2026-11-05T02:51+09:00"), "saved")
         self.assertEqual(saved.call_args.args[0], "2026-11-04 19:00 ニュースダイジェスト")
-        ns["generate_news_digest"].assert_called_once_with("one: headline one")
+        ns["generate_news_digest"].assert_called_once_with("社会・その他: headline one / 出典:  / https://example.com/a?utm_source=one")
 
     def test_empty_fetch_does_not_publish_or_use_cached_news(self):
         ns, saved = self.setup_runner([])
@@ -198,3 +198,16 @@ class NewsPipelineTests(TestCase):
         ns["get_rss_news"].assert_not_called()
         saved.assert_not_called()
 
+
+class EditorialSelectionTests(TestCase):
+    def test_category_tags_title_dedup_and_publisher_cap(self):
+        from news_content import balance_articles, CATEGORIES
+        candidates = [("日本経済", "新潟で生成AIの活用を開始", "https://example.org/one"),
+                      ("通信・IT", "新潟で生成AIの活用を開始！", "https://other.org/copy")]
+        candidates += [("世界経済", f"世界景気の異なる話題 {i}", f"https://example.org/{i}")
+                       for i in range(5)]
+        groups = balance_articles(candidates)
+        self.assertEqual(tuple(groups), CATEGORIES)
+        self.assertEqual(len(groups["新潟"]), 1)
+        self.assertEqual(groups["新潟"][0][2], ("AI・テクノロジー",))
+        self.assertEqual(len(groups["世界経済"]), 2)
