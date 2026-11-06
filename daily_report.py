@@ -2029,7 +2029,7 @@ def create_news_page(date_str, time_str="", retrieved_at=None):
     blocks       = []
     all_news_for_digest = []
 
-    from news_content import balance_articles, general_news_feeds
+    from news_content import balance_articles, general_news_feeds, select_top_news
 
     candidates = []
     source_failures = []
@@ -2046,18 +2046,21 @@ def create_news_page(date_str, time_str="", retrieved_at=None):
         [rt(f"配信枠: {date_str} {time_str}", bold=True),
          rt(f"｜取得開始: {retrieved_at or (date_str + ' ' + time_str)}")],
         "📰", "blue_background"))
-    top = [(category, items[0]) for category, items in category_news.items() if items][:5]
-    blocks.append(h2(f"重要ニュース TOP{len(top)}"))
+    top = select_top_news(category_news)
+    blocks.append(h2("今日の重要ニュース"))
+    if not top:
+        blocks.append(para("今回の候補に、重要ニュースの掲載基準を満たす記事はありません。"))
     for category, (headline, link, _) in top:
         blocks.append(bul(f"{category}｜{headline}", link))
         all_news_for_digest.append(
             f"{category}: {headline} / 出典: {getattr(headline, 'source', '')} / {link}")
-    digest = generate_news_digest("\n".join(all_news_for_digest))
-    if not isinstance(digest, str) or not digest.strip() or digest.startswith("ダイジェスト生成失敗"):
-        source_failures.append("AI要約")
-    else:
-        blocks.append(h2("重要ポイントと背景（AI要約・未検証）"))
-        blocks.extend(long_callout(digest, "📰", "blue_background"))
+    if top:
+        digest = generate_news_digest("\n".join(all_news_for_digest))
+        if not isinstance(digest, str) or not digest.strip() or digest.startswith("ダイジェスト生成失敗"):
+            source_failures.append("AI要約")
+        else:
+            blocks.append(h2("重要ポイントと背景（AI要約・未検証）"))
+            blocks.extend(long_callout(digest, "📰", "blue_background"))
     blocks.append(h2("カテゴリ別ニュース"))
     for category, items in category_news.items():
         children = []

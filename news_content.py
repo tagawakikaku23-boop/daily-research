@@ -52,6 +52,12 @@ def classify(headline, fallback):
     primary = tags[0] if tags else fallback
     return primary, tuple(category for category in tags if category != primary)
 
+def publisher_key(headline, link):
+    source = getattr(headline, "source", "") or urlsplit(link).hostname or ""
+    key = re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", source).casefold())
+    return "nikkei" if "nikkei" in key or "日経" in key else key
+
+
 def balance_articles(candidates):
     """Assign each story once and cap exposure to one publisher."""
     grouped = {category: [] for category in CATEGORIES}
@@ -62,10 +68,7 @@ def balance_articles(candidates):
     for fallback, headline, link in ordered:
         primary, tags = classify(headline, fallback)
         url, title = canonical_url(link), headline_key(headline)
-        source = getattr(headline, "source", "") or urlsplit(link).hostname or ""
-        publisher = re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", source).casefold())
-        if "nikkei" in publisher or "日経" in publisher:
-            publisher = "nikkei"
+        publisher = publisher_key(headline, link)
         if not url or url in urls or not title or title in titles:
             continue
         if publishers[publisher] >= 3 or len(grouped[primary]) >= 5:
@@ -157,3 +160,45 @@ def fresh_entry(entry, now=None):
     except (ValueError, TypeError, OverflowError):
         return False
 
+
+# Signals describe event types visible in the headline, not inferred outcomes.
+IMPACT = re.compile(
+    r"利上げ|利下げ|政策金利|金融政策|GDP|物価指数|雇用統計|日銀短観|"
+    r"買収|経営統合|事業承継|法案|制度改正|大規模障害|避難指示|警報", re.I)
+SECONDARY_IMPACT = re.compile(r"決算|賃上げ|輸出|関税|補助金|供給停止|脆弱性|地震")
+OFFICIAL_DOMAINS = ("go.jp", "boj.or.jp", "pref.niigata.lg.jp")
+
+def select_top_news(groups, now=None):
+    """Rank explicit impact, publication age and source provenance across categories."""
+    now = now or datetime.now(timezone.utc)
+    ranked = []
+    for category, articles in groups.items():
+        for headline, link, tags in articles:
+            title = unicodedata.normalize("NFKC", headline)
+            impact = 4 if IMPACT.search(title) else 2 if SECONDARY_IMPACT.search(title) else 0
+            stamp = publication_time({"published": getattr(headline, "published_at", None)})
+            if not impact or stamp is None:
+                continue
+            age = now - stamp
+            if not timedelta(0) <= age <= timedelta(days=2):
+                continue
+            freshness = 2 if age <= timedelta(hours=12) else 1 if age <= timedelta(days=1) else 0
+            domain = urlsplit(link).hostname or ""
+            direct = getattr(headline, "url_kind", "") == "配信元記事URL"
+            official = direct and any(domain == d or domain.endswith("." + d) for d in OFFICIAL_DOMAINS)
+            provenance = 2 if official else 1 if direct else 0
+            score = impact + freshness + provenance
+            if score >= 4:
+                ranked.append((score, stamp, category, headline, link, tags))
+    ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    selected, categories, publishers = [], Counter(), set()
+    for _, _, category, headline, link, tags in ranked:
+        publisher = publisher_key(headline, link)
+        if categories[category] >= 2 or publisher in publishers:
+            continue
+        selected.append((category, (headline, link, tags)))
+        categories[category] += 1
+        publishers.add(publisher)
+        if len(selected) == 5:
+            break
+    return selected

@@ -2,15 +2,18 @@ from unittest import TestCase
 from unittest.mock import Mock
 from test_delivery import extract, response, row, KINDS
 import test_news_resilience as pipeline
-from news_content import RssItems
+from datetime import datetime, timezone
+from news_content import NewsHeadline, RssItems
 from report_delivery import find_existing, publish
 from ops_health import completed_editions
 
 
 class PartialNewsTests(TestCase):
     def runner(self, failed=0):
-        return pipeline.NewsPipelineTests().setup_runner(RssItems(
-            [("Economic headline", "https://example.com/story")], 1, failed))
+        now = datetime.now(timezone.utc)
+        link = "https://example.com/story"
+        headline = NewsHeadline("Economic headline: GDP", {"link": link, "published": now.isoformat()}, link, now)
+        return pipeline.NewsPipelineTests().setup_runner(RssItems([(headline, link)], 1, failed))
 
     def test_partial_rss_is_saved_once_and_execution_fails(self):
         ns, saved = self.runner(failed=1)

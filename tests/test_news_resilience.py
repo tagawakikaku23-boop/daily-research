@@ -183,7 +183,7 @@ class NewsPipelineTests(TestCase):
                                        ("headline one", "https://example.com/a?utm_source=two")])
         self.assertEqual(ns["create_news_page"]("2026-11-04", "19:00", "2026-11-05T02:51+09:00"), "saved")
         self.assertEqual(saved.call_args.args[0], "2026-11-04 19:00 ニュースダイジェスト")
-        ns["generate_news_digest"].assert_called_once_with("日本経済: headline one / 出典:  / https://example.com/a?utm_source=one")
+        ns["generate_news_digest"].assert_not_called()
 
     def test_empty_fetch_does_not_publish_or_use_cached_news(self):
         ns, saved = self.setup_runner([])
@@ -211,3 +211,21 @@ class EditorialSelectionTests(TestCase):
         self.assertEqual(len(groups["新潟"]), 1)
         self.assertEqual(groups["新潟"][0][2], ("AI・テクノロジー",))
         self.assertEqual(len(groups["世界経済"]), 2)
+
+class TopNewsTests(TestCase):
+    def test_impact_provenance_recency_and_diversity(self):
+        from datetime import timezone
+        from news_content import NewsHeadline, select_top_news
+        now = datetime(2026, 11, 6, 0, tzinfo=timezone.utc)
+        def article(title, domain, hours=1):
+            url = f"https://{domain}/{hours}"
+            entry = {"link": url, "published": (now - timedelta(hours=hours)).isoformat()}
+            return NewsHeadline(title, entry, url, now), url, ()
+        groups = {
+            "日本経済": [article("日常の話題", "example.com"), article("GDP発表", "cao.go.jp"),
+                      article("物価指数発表", "cao.go.jp", 2)],
+            "金融・マーケット": [article("政策金利を発表", "boj.or.jp"),
+                           article("為替動向", "example.org", 60)],
+        }
+        self.assertEqual([str(item[0]) for _, item in select_top_news(groups, now)],
+                         ["GDP発表", "政策金利を発表"])
