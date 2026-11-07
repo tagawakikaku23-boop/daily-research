@@ -160,6 +160,35 @@ def project_holdings(incoming, existing):
     return grouped
 
 
+def normalize_holding(row, mapping, defaults):
+    """Read only columns explicitly matched to a confirmed export header."""
+    if (set(mapping) & set(defaults) or
+            set(mapping) | set(defaults) != set(HOLDING_COLUMNS) or
+            len(set(mapping.values())) != len(mapping) or
+            not set(mapping.values()) <= row.keys()):
+        raise ValueError("保有一覧の列対応を確認")
+    return holding({**defaults, **{key: row[column] for key, column in mapping.items()}})
+
+
+def absent_holdings(incoming, existing):
+    seen = {row.get("key") for row in incoming}
+    return [{"key": row["key"], "status": "未取得",
+             "reason": "一覧にない。売却は取引記録等で別途確認"}
+            for row in existing if row["key"] not in seen]
+
+
+def collect_projected_market_data(grouped, instruments, get_stock_data, get_ticker_news):
+    """Connect the report's existing quote/dividend and news functions."""
+    result = {}
+    for key in sorted(grouped.keys() & instruments.keys()):
+        if grouped[key]["株数"] is None:
+            continue
+        ticker, name = instruments[key]
+        result[key] = {"quote_and_dividend": get_stock_data(ticker),
+                       "news": get_ticker_news(name)}
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description="ローカル取込差分確認。Notionへの書込みなし")
     parser.add_argument("kind", choices=("assets", "holdings"))
@@ -167,8 +196,13 @@ def main():
     parser.add_argument("--existing", type=Path, help="正規化済み既存行のJSON配列")
     parser.add_argument("--headers-only", action="store_true", help="先頭行の列名だけ確認")
     parser.add_argument("--encoding", choices=("utf-8-sig", "cp932"), default="utf-8-sig")
+    parser.add_argument("--delimiter", choices=("csv", "tsv"))
+    parser.add_argument("--column-map", type=Path, help="保有CSVの確認済み mapping/defaults JSON")
     args = parser.parse_args()
-    delimiter = "," if args.kind == "assets" else "\t"
+    if args.column_map and args.kind != "holdings":
+        parser.error("--column-map は holdings 専用")
+    delimiter = "," if (args.delimiter == "csv" or
+                        (args.delimiter is None and args.kind == "assets")) else "\t"
     if args.headers_only:
         with args.input.open(encoding=args.encoding, newline="") as file:
             headers = [clean(value) for value in next(csv.reader(file, delimiter=delimiter), [])]
@@ -177,6 +211,9 @@ def main():
     existing = (json.loads(args.existing.read_text(encoding="utf-8-sig"))
                 if args.existing else [])
     convert = assets if args.kind == "assets" else holding
+    if args.column_map:
+        config = json.loads(args.column_map.read_text(encoding="utf-8-sig"))
+        convert = lambda row: normalize_holding(row, config["mapping"], config.get("defaults", {}))
     incoming = []
     for line, raw in read_rows(args.input, delimiter, args.encoding):
         try:
@@ -189,6 +226,7 @@ def main():
               "comparison": "既存行と比較" if args.existing else "既存行未指定の仮判定"}
     if args.kind == "holdings":
         grouped = project_holdings(incoming, existing)
+        output["今回未取得の既存明細"] = absent_holdings(incoming, existing)
         output["反映後の銘柄合算案" if args.existing else "入力分のみの銘柄合算"] = grouped
         output["株価・配当・ニュースの共通取得キー候補"] = sorted(grouped)
     print(json.dumps(output, ensure_ascii=True, indent=2))
