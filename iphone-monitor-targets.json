@@ -1,0 +1,5 @@
+{
+  "iPhone Duo": {"apple_slug": "iphone-duo", "capacities": ["256GB", "512GB", "1TB", "2TB"]},
+  "iPhone 18 Pro Max": {"apple_slug": "iphone-18-pro", "capacities": ["256GB", "512GB", "1TB", "2TB"]},
+  "iPhone 18 Pro": {"apple_slug": "iphone-18-pro", "capacities": ["256GB", "512GB", "1TB"]}
+}

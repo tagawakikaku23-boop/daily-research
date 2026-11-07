@@ -1,0 +1,76 @@
+name: iPhone official price research
+on:
+  push:
+    branches: [codex/iphone-official-monitor]
+    paths:
+      - 'iphone_monitor.py'
+      - 'iphone-monitor-targets.json'
+      - 'tests/test_iphone_monitor.py'
+      - 'tests/fixtures/iphone/**'
+      - 'requirements-iphone.txt'
+      - '.github/workflows/iphone_monitor.yml'
+  workflow_dispatch:
+    inputs:
+      save:
+        description: 'Append new official research observations to Notion'
+        type: boolean
+        default: false
+  schedule:
+    - cron: '0 23 * * *' # JST 08:00
+    - cron: '0 11 * * *' # JST 20:00
+permissions:
+  contents: read
+concurrency:
+  group: iphone-official-notion-writer
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.event_name != 'schedule' || vars.IPHONE_MONITOR_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements-iphone.txt
+      - name: Regression and price/save safeguards
+        run: python -m unittest discover -s tests -v
+      - run: python -m playwright install --with-deps chromium
+      - name: Official research and verified append only
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          EVENT: ${{ github.event_name }}
+          CRON: ${{ github.event.schedule }}
+          SAVE_REQUESTED: ${{ inputs.save }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          slot="validation-${GITHUB_RUN_ID}"
+          save_args=()
+          if [ "$EVENT" = "schedule" ]; then
+            hour=$(TZ=Asia/Tokyo date +%H)
+            date_jst=$(TZ=Asia/Tokyo date +%F)
+            if [ "$CRON" = '0 23 * * *' ]; then
+              [ "$hour" -ge 8 ] && [ "$hour" -lt 12 ] || { echo 'Late morning run stopped'; exit 1; }
+              slot="${date_jst}-08"
+            else
+              [ "$hour" -ge 20 ] && [ "$hour" -lt 24 ] || { echo 'Late evening run stopped'; exit 1; }
+              slot="${date_jst}-20"
+            fi
+            save_args=(--save)
+          elif [ "$EVENT" = "push" ]; then
+            # Branch pushes are read-only. Live writes require explicit manual save or approved schedule.
+            save_args=()
+          elif [ "$SAVE_REQUESTED" = "true" ]; then
+            save_args=(--save --verify-rerun)
+          fi
+          python iphone_monitor.py --slot "$slot" "${save_args[@]}"
+      - name: Keep public-source observation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iphone-observation-${{ github.run_id }}
+          path: iphone-observation.json
+          retention-days: 7
+          if-no-files-found: ignore
