@@ -1,4 +1,5 @@
 import argparse
+from calendar import monthrange
 import csv
 import json
 from collections import Counter, defaultdict
@@ -189,6 +190,55 @@ def collect_projected_market_data(grouped, instruments, get_stock_data, get_tick
     return result
 
 
+MF_ASSET_HEADER = ("日付", "合計", "預金・現金", "株式(現物)", "投資信託",
+                   "年金", "ポイント", "詳細")
+MF_HOLDING_HEADER = ("銘柄コード", "銘柄名", "保有数", "平均取得単価", "現在値",
+                     "評価額", "前日比", "評価損益", "評価損益率", "保有金融機関",
+                     "取得日", "変更", "削除")
+
+
+def money_forward_paste(text, kind):
+    """Extract the requested table from a full Money Forward ME page paste."""
+    header = MF_ASSET_HEADER if kind == "assets" else MF_HOLDING_HEADER
+    separator = r"\s+".join(map(re.escape, header))
+    match = re.search(r"(?m)^\s*" + separator + r"[^\S\n]*\n", clean(text))
+    if match is None:
+        raise ValueError("マネーフォワードの表の見出しを確認")
+    rows = []
+    for line in clean(text)[match.end():].splitlines():
+        if not line.strip():
+            continue
+        if "\t" not in line:
+            break
+        cells = [cell.strip() for cell in line.split("\t")]
+        required = len(header) if kind == "assets" else 10
+        if not required <= len(cells) <= len(header):
+            raise ValueError("貼り付けた表の列数を確認")
+        row = dict(zip(header, cells))
+        rows.append(mf_pasted_asset(row) if kind == "assets" else mf_pasted_holding(row))
+    if not rows:
+        raise ValueError("見出しの下に明細がない")
+    return rows
+
+
+def mf_pasted_asset(row):
+    stamp = row["日付"]
+    month = re.fullmatch(r"(\d{4})-(\d{2})月末", stamp)
+    if month:
+        year, mon = map(int, month.groups())
+        stamp = date(year, mon, monthrange(year, mon)[1]).isoformat()
+    amount_columns = {"合計": "合計", "預金・現金": "現金", "株式(現物)": "株式ETF",
+                      "投資信託": "投資信託", "年金": "年金", "ポイント": "ポイント"}
+    amounts = {target: number(row[source].removesuffix("円"), integer=True)
+               for source, target in amount_columns.items()}
+    return {"key": f"MF|JPY|{day(stamp)}", "date": day(stamp), "values": amounts}
+
+
+def mf_pasted_holding(row):
+    return {"status": "保留", "reason": "口座区分・市場・取得単価通貨・残高基準日を確認",
+            "source_fields": {key: row[key] for key in MF_HOLDING_HEADER[:10]}}
+
+
 def main():
     parser = argparse.ArgumentParser(description="ローカル取込差分確認。Notionへの書込みなし")
     parser.add_argument("kind", choices=("assets", "holdings"))
@@ -198,9 +248,20 @@ def main():
     parser.add_argument("--encoding", choices=("utf-8-sig", "cp932"), default="utf-8-sig")
     parser.add_argument("--delimiter", choices=("csv", "tsv"))
     parser.add_argument("--column-map", type=Path, help="保有CSVの確認済み mapping/defaults JSON")
+    parser.add_argument("--mf-paste", action="store_true", help="MF資産内訳または資産推移の画面コピー")
     args = parser.parse_args()
     if args.column_map and args.kind != "holdings":
         parser.error("--column-map は holdings 専用")
+    if args.mf_paste:
+        if args.column_map or args.headers_only or args.delimiter:
+            parser.error("--mf-paste は列指定・ヘッダー抽出と併用できません")
+        existing = (json.loads(args.existing.read_text(encoding="utf-8-sig"))
+                    if args.existing else [])
+        rows = money_forward_paste(args.input.read_text(encoding=args.encoding), args.kind)
+        print(json.dumps({"rows": preview(rows, existing, args.kind),
+                          "comparison": "既存行と比較" if args.existing else "仮判定"},
+                         ensure_ascii=True, indent=2))
+        return
     delimiter = "," if (args.delimiter == "csv" or
                         (args.delimiter is None and args.kind == "assets")) else "\t"
     if args.headers_only:
