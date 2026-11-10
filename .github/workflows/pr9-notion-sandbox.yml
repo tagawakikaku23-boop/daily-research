@@ -50,3 +50,198 @@ jobs:
                   ok = False
           raise SystemExit(0 if ok else 1)
           PY
+
+  sandbox-delivery:
+    needs: sandbox-access
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    concurrency:
+      group: pr9-notion-sandbox-delivery
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 7d39209f2b36db9ffa3a5e11acb008c54a43eb58
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests feedparser yfinance groq jpholiday
+      - name: Publish synthetic fixtures in sandbox and verify readback
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          NOTION_PAGE_ID: 40efc83b-0e47-81a3-955c-ed432a99b823
+          NOTION_DB_ID: 2d02e561-476b-4b1d-8125-809494d17c03
+          REPORT_COMPONENT: news
+        run: |
+          python - <<'PY'
+          import contextlib
+          import os
+          import sys
+          from datetime import datetime, date, timedelta, timezone
+          from urllib.parse import urlsplit
+          
+          import requests
+          
+          DB = "2d02e561-476b-4b1d-8125-809494d17c03"
+          API = "https://api.notion.com/v1"
+          HEADERS = {"Authorization": "Bearer " + os.environ["NOTION_API_KEY"],
+                     "Notion-Version": "2022-06-28"}
+          stage = "sandbox preflight"
+          
+          
+          def require(condition):
+              if not condition:
+                  raise RuntimeError("Check failed")
+          
+          
+          class SimulatedFinalizeFailure(Exception):
+              pass
+          
+          
+          class SandboxTransport:
+              def __init__(self):
+                  self.pages = []
+                  self.fail_finalize = False
+          
+              def post(self, url, **kwargs):
+                  if url == f"{API}/databases/{DB}/query":
+                      return requests.post(url, **kwargs, allow_redirects=False)
+                  require(url == f"{API}/pages")
+                  require(kwargs["json"]["parent"] == {"database_id": DB})
+                  response = requests.post(url, **kwargs, allow_redirects=False)
+                  response.raise_for_status()
+                  self.pages.append(response.json()["id"])
+                  return response
+          
+              def patch(self, url, **kwargs):
+                  require(any(url in (f"{API}/pages/{page}", f"{API}/blocks/{page}/children")
+                              for page in self.pages))
+                  if self.fail_finalize and "icon" in kwargs["json"]:
+                      raise SimulatedFinalizeFailure()
+                  return requests.patch(url, **kwargs, allow_redirects=False)
+          
+          
+          def get(path, params=None):
+              response = requests.get(f"{API}/{path}", headers=HEADERS, params=params,
+                                      timeout=25, allow_redirects=False)
+              response.raise_for_status()
+              return response.json()
+          
+          
+          def read_blocks(parent):
+              rows = []
+              cursor = None
+              while True:
+                  params = {"page_size": 100}
+                  if cursor:
+                      params["start_cursor"] = cursor
+                  page = get(f"blocks/{parent}/children", params)
+                  rows.extend(page["results"])
+                  if not page["has_more"]:
+                      return rows
+                  cursor = page["next_cursor"]
+          
+          
+          def shape(block, remote=False):
+              kind = block["type"]
+              fields = block[kind]
+              text = [(r["text"]["content"], (r["text"].get("link") or {}).get("url"))
+                      for r in fields.get("rich_text", [])]
+              children = (read_blocks(block["id"]) if block.get("has_children") else []) if remote else fields.get("children", [])
+              return kind, text, [shape(child, remote) for child in children]
+          
+          
+          def main():
+              global stage
+              schema = get(f"databases/{DB}")
+              require("架空データ専用" in "".join(t["plain_text"] for t in schema["title"]))
+              require(schema["properties"]["種類"]["type"] == "select")
+              require(os.environ["NOTION_DB_ID"] == DB and os.environ["REPORT_COMPONENT"] == "news")
+          
+              stage = "load pinned news publisher"
+              import daily_report as report
+              from news_content import CATEGORIES, NewsHeadline, RssItems
+              require(report.NOTION_DB_ID == DB and not report.HOLDINGS and not report.WATCHLIST)
+              transport = SandboxTransport()
+              report.requests = transport
+              now = datetime.now(timezone.utc)
+              headlines = ("GDP速報", "世界貿易と関税", "政策金利", "新潟で避難指示",
+                           "企業の買収", "通信の大規模障害", "生成AIの脆弱性", "防災制度改正")
+              batches = []
+              for index, headline in enumerate(headlines):
+                  link = f"https://source{index}.example.org/{index}"
+                  item = NewsHeadline("【架空・PR9試験】" + headline, {
+                      "published": (now - timedelta(minutes=10)).isoformat(), "link": link,
+                  }, link, now)
+                  batches.append(RssItems([(item, link), (item, link + "?utm_source=fixture")], 1, 0))
+              queue = iter(batches)
+              report.get_rss_news = lambda *args, **kwargs: next(queue)
+              original_publish = report.publish
+              expected = []
+          
+              def capture(*args, **kwargs):
+                  expected[:] = [shape(block) for block in args[3]]
+                  return original_publish(*args, **kwargs)
+          
+              report.publish = capture
+              target_date = (date(2090, 1, 1) + timedelta(
+                  days=int(os.environ["GITHUB_RUN_NUMBER"]) * 20 + int(os.environ["GITHUB_RUN_ATTEMPT"])
+              )).isoformat()
+              label = "07:00 [PR9 架空試験]"
+          
+              stage = "save synthetic issue through PR #9"
+              # The publisher may print page links. Keep repository logs free of private URLs.
+              with contextlib.redirect_stdout(open(os.devnull, "w", encoding="utf-8")):
+                  first = report.create_news_page(target_date, label, now.isoformat())
+              require(len(transport.pages) == 1 and first)
+              stage = "verify full readback, categories and TOP5"
+              page = transport.pages[0]
+              actual = [shape(block, remote=True) for block in read_blocks(page)]
+              require(actual == expected)
+              require(actual[-1][1][0][0].startswith("公開RSSの見出しを使用"))
+              toggles = [row for row in actual if row[0] == "toggle"]
+              require([row[1][0][0].split("（")[0] for row in toggles] == list(CATEGORIES))
+              require(all("（1件）" in row[1][0][0] for row in toggles))
+              top = [row for row in actual if row[0] == "bulleted_list_item"]
+              require(len(top) == 5 and len({row[1][0][1] for row in top}) == 5)
+              require(get(f"pages/{page}")["icon"]["emoji"] == "📰")
+              print("PASS: Notion save, full nested readback, 8 categories, TOP5 and article dedup")
+          
+              stage = "verify healthy retry does not create a page"
+              require(report.create_news_page(target_date, label, now.isoformat()) == first)
+              require(len(transport.pages) == 1)
+              print("PASS: same edition returned the existing page")
+          
+              stage = "simulate a failure after Notion accepts the page"
+              queue = iter(batches)
+              transport.fail_finalize = True
+              try:
+                  report.create_news_page(target_date, "19:00 [PR9 架空・故障試験]", now.isoformat())
+              except SimulatedFinalizeFailure:
+                  pass
+              else:
+                  raise RuntimeError("Failure did not trigger")
+              require(len(transport.pages) == 2)
+              require(get(f"pages/{transport.pages[-1]}")["icon"]["emoji"] == "⏳")
+              transport.fail_finalize = False
+              try:
+                  report.create_news_page(target_date, "19:00 [PR9 架空・故障試験]", now.isoformat())
+              except RuntimeError as error:
+                  require("同じ回の投稿が未完了" in str(error))
+              else:
+                  raise RuntimeError("Pending issue allowed a retry")
+              require(len(transport.pages) == 2)
+              print("PASS: pending issue blocked unsafe retry; no duplicate or overwrite")
+          
+          
+          try:
+              main()
+          except requests.HTTPError as error:
+              print(f"FAIL: {stage}; HTTP {error.response.status_code}", file=sys.stderr)
+              sys.exit(1)
+          except Exception as error:
+              print(f"FAIL: {stage}; {type(error).__name__}", file=sys.stderr)
+              sys.exit(1)
+          PY
