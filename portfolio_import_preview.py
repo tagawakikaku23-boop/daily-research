@@ -239,6 +239,18 @@ def mf_pasted_holding(row):
             "source_fields": {key: row[key] for key in MF_HOLDING_HEADER[:10]}}
 
 
+def monthly_asset_candidates(rows):
+    """Retain explicit month ends and the latest date; preserve ties for review."""
+    latest = max(row["date"] for row in rows)
+    candidates = []
+    for row in rows:
+        stamp = date.fromisoformat(row["date"])
+        month_end = stamp.day == monthrange(stamp.year, stamp.month)[1]
+        if month_end or row["date"] == latest:
+            candidates.append(row)
+    return candidates
+
+
 def main():
     parser = argparse.ArgumentParser(description="ローカル取込差分確認。Notionへの書込みなし")
     parser.add_argument("kind", choices=("assets", "holdings"))
@@ -249,15 +261,21 @@ def main():
     parser.add_argument("--delimiter", choices=("csv", "tsv"))
     parser.add_argument("--column-map", type=Path, help="保有CSVの確認済み mapping/defaults JSON")
     parser.add_argument("--mf-paste", action="store_true", help="MF資産内訳または資産推移の画面コピー")
+    parser.add_argument("--monthly-candidates", action="store_true",
+                        help="資産推移から月末と最新日だけを照合")
     args = parser.parse_args()
     if args.column_map and args.kind != "holdings":
         parser.error("--column-map は holdings 専用")
+    if args.monthly_candidates and (args.kind != "assets" or not args.mf_paste):
+        parser.error("--monthly-candidates は assets --mf-paste 専用")
     if args.mf_paste:
         if args.column_map or args.headers_only or args.delimiter:
             parser.error("--mf-paste は列指定・ヘッダー抽出と併用できません")
         existing = (json.loads(args.existing.read_text(encoding="utf-8-sig"))
                     if args.existing else [])
         rows = money_forward_paste(args.input.read_text(encoding=args.encoding), args.kind)
+        if args.monthly_candidates:
+            rows = monthly_asset_candidates(rows)
         print(json.dumps({"rows": preview(rows, existing, args.kind),
                           "comparison": "既存行と比較" if args.existing else "仮判定"},
                          ensure_ascii=True, indent=2))
